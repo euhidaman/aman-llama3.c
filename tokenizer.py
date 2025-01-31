@@ -1,7 +1,3 @@
-# Taken from llama code and lightly modified
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 3 Community License Agreement.
-
 import argparse
 import array
 import os
@@ -101,6 +97,11 @@ class Tokenizer:
         return t
 
     def decode(self, t: List[int]) -> str:
+        # Remove BOS and EOS tokens if they are present
+        if t[0] == self.bos_id:
+            t = t[1:]
+        if t[-1] == self.eos_id:
+            t = t[:-1]
         return self.model.decode(t)
 
     def export(self):
