@@ -303,18 +303,18 @@ class Llama3(nn.Module):
             for _ in range(max_gen_len):
                 logits = self.forward_inference(
                     tokens[:, -self.max_seq_len:], start_pos)
-                logits = logits[:, -1:, :]  # Keep only the last token's logits
-
-                # Convert logits to float32 for sampling
-                logits = logits.float()
+                logits = logits[:, -1, :]  # Keep only the last token's logits
+                logits = logits.float()  # Convert to float32 for sampling
 
                 if temperature > 0:
                     probs = torch.softmax(logits / temperature, dim=-1)
                     next_token = self._sample_top_p_top_k(
-                        probs, top_p, top_k).to(self.dtype)
+                        probs, top_p, top_k)
                 else:
                     next_token = torch.argmax(logits, dim=-1)
 
+                # Ensure next_token has the right shape [batch_size, 1]
+                next_token = next_token.unsqueeze(-1)
                 tokens = torch.cat([tokens, next_token], dim=1)
                 start_pos += 1
 
@@ -327,39 +327,36 @@ class Llama3(nn.Module):
 
     def _sample_top_p_top_k(self, probs, top_p, top_k=None):
         """Sample from the distribution with top-p and top-k filtering"""
-        probs = probs.float().squeeze(0).squeeze(
-            0)  # Remove batch and sequence dimensions
-
+        # probs shape: [batch_size, vocab_size]
         if top_k is not None:
             values, indices = torch.topk(probs, min(top_k, probs.size(-1)))
-            probs = torch.zeros_like(probs).scatter_(0, indices, values)
+            probs = torch.zeros_like(probs).scatter_(-1, indices, values)
 
         if top_p < 1.0:
-            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+            sorted_probs, sorted_indices = torch.sort(
+                probs, dim=-1, descending=True)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
             # Remove tokens with cumulative probability above the threshold
             sorted_indices_to_remove = cumulative_probs > top_p
 
             # Shift the indices to the right to keep also the first token above the threshold
-            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-            sorted_indices_to_remove[0] = False
+            sorted_indices_to_remove[...,
+                                     1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = False
 
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            probs[indices_to_remove] = 0.0
+            # scatter sorted tensors to original indexing
+            indices_to_remove = sorted_indices_to_remove.scatter(
+                -1, sorted_indices, sorted_indices_to_remove)
+            probs = probs.masked_fill(indices_to_remove, 0.0)
 
         # Renormalize the probabilities
-        if probs.sum() > 0:
-            probs = probs / probs.sum()
-        else:
-            # If all probabilities are zero, set uniform distribution
-            probs = torch.ones_like(probs) / probs.size(0)
+        probs_sum = probs.sum(dim=-1, keepdim=True)
+        probs = probs.div(probs_sum.clamp(min=1e-20))
 
         # Sample from the filtered distribution
         next_token = torch.multinomial(probs, num_samples=1)
-
-        # Add batch and sequence dimensions back
-        return next_token.unsqueeze(0).unsqueeze(0)
+        return next_token
 
     def save_pretrained(self, save_directory: str):
         """Save model weights and configuration"""
