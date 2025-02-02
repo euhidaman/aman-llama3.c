@@ -293,45 +293,67 @@ class Llama3(nn.Module):
         if max_gen_len is None:
             max_gen_len = self.max_seq_len - len(prompt)
 
+        # Encode and prepare tokens
         tokens = self.tokenizer.encode(prompt, bos=True, eos=False)
         tokens = torch.tensor(tokens, dtype=torch.long,
                               device=self.params.device)
-        tokens = tokens.unsqueeze(0)  # Add batch dimension
+        tokens = tokens.unsqueeze(0)  # Add batch dimension [1, seq_len]
 
         start_pos = 0
         with torch.amp.autocast(device_type=self.params.device, dtype=self.dtype):
             for _ in range(max_gen_len):
+                # Get logits for next token
                 logits = self.forward_inference(
                     tokens[:, -self.max_seq_len:], start_pos)
-                logits = logits[:, -1, :]  # Keep only the last token's logits
-                logits = logits.float()  # Convert to float32 for sampling
+                # Take the logits for the last token and convert to float32 for sampling
+                logits = logits[:, -1, :].float()  # [1, vocab_size]
 
                 if temperature > 0:
-                    probs = torch.softmax(logits / temperature, dim=-1)
-                    next_token = self._sample_top_p_top_k(
-                        probs, top_p, top_k)
+                    # Apply temperature
+                    logits = logits / temperature
+                    # Apply softmax to get probabilities
+                    probs = torch.softmax(logits, dim=-1)
+                    # Sample next token
+                    if top_p > 0:
+                        next_token = self._sample_top_p_top_k(
+                            probs, top_p, top_k)
+                    else:
+                        next_token = torch.multinomial(probs, num_samples=1)
                 else:
-                    next_token = torch.argmax(logits, dim=-1)
+                    # Greedy sampling
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-                # Ensure next_token has the right shape [batch_size, 1]
-                next_token = next_token.unsqueeze(-1)
+                # Make sure next_token has shape [1, 1]
+                if next_token.dim() == 1:
+                    next_token = next_token.unsqueeze(0)
+                if next_token.dim() == 3:
+                    next_token = next_token.squeeze(1)
+
+                # Concatenate with previous tokens
                 tokens = torch.cat([tokens, next_token], dim=1)
                 start_pos += 1
 
+                # Check for EOS token
                 if next_token.item() == self.tokenizer.eos_id:
                     break
 
+        # Decode the generated tokens
         generated_tokens = tokens[0].tolist()  # Remove batch dimension
         generated_text = self.tokenizer.decode(generated_tokens)
         return generated_text
 
     def _sample_top_p_top_k(self, probs, top_p, top_k=None):
         """Sample from the distribution with top-p and top-k filtering"""
-        # probs shape: [batch_size, vocab_size]
-        if top_k is not None:
+        # Make sure we're working with 2D tensor [batch_size, vocab_size]
+        if probs.dim() == 1:
+            probs = probs.unsqueeze(0)
+
+        # Apply top-k filtering
+        if top_k is not None and top_k > 0:
             values, indices = torch.topk(probs, min(top_k, probs.size(-1)))
             probs = torch.zeros_like(probs).scatter_(-1, indices, values)
 
+        # Apply top-p filtering
         if top_p < 1.0:
             sorted_probs, sorted_indices = torch.sort(
                 probs, dim=-1, descending=True)
@@ -343,19 +365,19 @@ class Llama3(nn.Module):
             # Shift the indices to the right to keep also the first token above the threshold
             sorted_indices_to_remove[...,
                                      1:] = sorted_indices_to_remove[..., :-1].clone()
-            sorted_indices_to_remove[..., 0] = False
+            sorted_indices_to_remove[..., 0] = 0
 
-            # scatter sorted tensors to original indexing
-            indices_to_remove = sorted_indices_to_remove.scatter(
-                -1, sorted_indices, sorted_indices_to_remove)
-            probs = probs.masked_fill(indices_to_remove, 0.0)
+            for batch_idx in range(probs.size(0)):
+                indices_to_remove = sorted_indices[batch_idx][sorted_indices_to_remove[batch_idx]]
+                probs[batch_idx, indices_to_remove] = 0
 
         # Renormalize the probabilities
         probs_sum = probs.sum(dim=-1, keepdim=True)
         probs = probs.div(probs_sum.clamp(min=1e-20))
 
         # Sample from the filtered distribution
-        next_token = torch.multinomial(probs, num_samples=1)
+        next_token = torch.multinomial(probs, num_samples=1)  # [batch_size, 1]
+
         return next_token
 
     def save_pretrained(self, save_directory: str):
