@@ -1,5 +1,7 @@
 # train.py
 
+from model import Llama3
+from params import ModelArgs, tokenizer, dtype_str
 import sys
 import os
 import glob
@@ -14,12 +16,16 @@ from datetime import datetime
 from pathlib import Path
 import psutil
 from tqdm import tqdm
+import warnings
+
+# Suppress complex values warning
+warnings.filterwarnings(
+    "ignore", message="Casting complex values to real discards the imaginary part")
 
 # importing the model config
-from params import ModelArgs, tokenizer, dtype_str
 
 # importing the model
-from model import Llama3
+
 
 def setup_args():
     parser = argparse.ArgumentParser(description='Train Llama3 Model')
@@ -47,26 +53,23 @@ def setup_args():
                         help='run with minimal data for testing')
     return parser.parse_args()
 
+
 def get_data_dir(dtype_str):
     """Get the directory containing tokenized data for the specified dtype"""
     return os.path.join("data", f"tok512_{dtype_str}")
 
+
 def load_data_in_chunks(data_files, chunk_size=1000000):
-    """
-    Load data in chunks to manage memory usage
-    """
+    """Load data in chunks to manage memory usage"""
     print("\nUsing chunk-based loading...")
-    
-    # First pass: count total tokens
+
     total_tokens = 0
     for file in tqdm(data_files, desc="Counting tokens"):
-        total_tokens += os.path.getsize(file) // 2  # uint16 = 2 bytes
+        total_tokens += os.path.getsize(file) // 2
 
-    # Preallocate the array
     final_data = np.zeros(total_tokens, dtype=np.uint16)
     current_pos = 0
 
-    # Second pass: load data in chunks
     for file in tqdm(data_files, desc="Loading chunks"):
         try:
             with open(file, "rb") as f:
@@ -82,16 +85,11 @@ def load_data_in_chunks(data_files, chunk_size=1000000):
 
     print(f"\nChunk loading completed!")
     print(f"Total tokens loaded: {current_pos:,}")
-    return final_data[:current_pos]  # Trim any unused preallocated space
+    return final_data[:current_pos]
+
 
 def load_preprocessed_data(data_dir, max_files=None):
-    """
-    Load preprocessed data from binary files with memory-efficient approach
-    
-    Args:
-        data_dir (str): Directory containing the binary files
-        max_files (int, optional): Maximum number of files to load. If None, load all files.
-    """
+    """Load preprocessed data from binary files with memory-efficient approach"""
     print(f"\nLoading data from {data_dir}")
     data_files = sorted(glob.glob(os.path.join(data_dir, "*.bin")))
 
@@ -101,19 +99,18 @@ def load_preprocessed_data(data_dir, max_files=None):
             f"Please run pretokenize with --dtype={dtype_str} first."
         )
 
-    # Limit the number of files for initial testing
     if max_files is not None:
         data_files = data_files[:max_files]
         print(f"Loading first {max_files} files for testing...")
 
-    # Calculate total size and memory requirements
     total_size = sum(os.path.getsize(f) for f in data_files)
-    required_memory = total_size * 2  # Rough estimate including overhead
+    required_memory = total_size * 2
     available_memory = psutil.virtual_memory().available
 
     print(f"\nMemory Analysis:")
     print(f"Total data size: {total_size/1024/1024/1024:.2f} GB")
-    print(f"Estimated memory required: {required_memory/1024/1024/1024:.2f} GB")
+    print(
+        f"Estimated memory required: {required_memory/1024/1024/1024:.2f} GB")
     print(f"Available system memory: {available_memory/1024/1024/1024:.2f} GB")
 
     if required_memory > available_memory:
@@ -124,32 +121,30 @@ def load_preprocessed_data(data_dir, max_files=None):
     try:
         all_data = []
         total_tokens = 0
-        
+
         for file in tqdm(data_files, desc="Loading data files"):
             try:
                 with open(file, "rb") as f:
                     data = np.fromfile(f, dtype=np.uint16)
                     all_data.append(data)
                     total_tokens += len(data)
-                    
-                    # Print progress every 10 files
+
                     if len(all_data) % 10 == 0:
                         current_memory = psutil.Process().memory_info().rss
                         print(f"\nLoaded {len(all_data)} files, "
                               f"Current memory usage: {current_memory/1024/1024/1024:.2f} GB")
-                        
+
             except Exception as e:
                 print(f"\nError loading file {file}: {str(e)}")
                 continue
 
         print(f"\nSuccessfully loaded {len(data_files)} files")
         print(f"Total tokens: {total_tokens:,}")
-        
-        # Concatenate with progress indication
+
         print("\nConcatenating data arrays...")
         final_data = np.concatenate(all_data)
         print(f"Final data shape: {final_data.shape}")
-        
+
         return final_data
 
     except MemoryError:
@@ -157,13 +152,18 @@ def load_preprocessed_data(data_dir, max_files=None):
         print("Switching to chunk-based loading...")
         return load_data_in_chunks(data_files)
 
+
 def get_batch(data, split, batch_size, max_seq_len, device):
     """Generate a batch of data for training or validation"""
-    data_split = data[:int(0.9 * len(data))] if split == 'train' else data[int(0.9 * len(data)):]
+    data_split = data[:int(0.9 * len(data))
+                      ] if split == 'train' else data[int(0.9 * len(data)):]
     ix = torch.randint(len(data_split) - max_seq_len, (batch_size,))
-    x = torch.stack([torch.from_numpy(data_split[i:i + max_seq_len].copy()) for i in ix])
-    y = torch.stack([torch.from_numpy(data_split[i + 1:i + max_seq_len + 1].copy()) for i in ix])
+    x = torch.stack(
+        [torch.from_numpy(data_split[i:i + max_seq_len].copy()) for i in ix])
+    y = torch.stack(
+        [torch.from_numpy(data_split[i + 1:i + max_seq_len + 1].copy()) for i in ix])
     return x.to(device), y.to(device)
+
 
 @torch.no_grad()
 def estimate_loss(model, data, batch_size, eval_iters=5):
@@ -173,26 +173,28 @@ def estimate_loss(model, data, batch_size, eval_iters=5):
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(data, split, batch_size, model.max_seq_len, model.params.device)
+            X, Y = get_batch(data, split, batch_size,
+                             model.max_seq_len, model.params.device)
             logits, loss = model(X, targets=Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
 
+
 def create_lr_scheduler(optimizer, warmup_iters, max_iters, min_lr, max_lr):
     """Create learning rate scheduler with warmup and cosine decay"""
     def lr_lambda(current_iter):
         if current_iter < warmup_iters:
-            # Linear warmup
             return current_iter / warmup_iters
         else:
-            # Cosine decay
-            decay_ratio = (current_iter - warmup_iters) / (max_iters - warmup_iters)
+            decay_ratio = (current_iter - warmup_iters) / \
+                (max_iters - warmup_iters)
             cosine_decay = 0.5 * (1 + math.cos(math.pi * decay_ratio))
             return max(min_lr / max_lr, cosine_decay)
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
 
 def save_checkpoint(model, optimizer, scheduler, iteration, loss, save_dir):
     """Save a training checkpoint"""
@@ -206,9 +208,36 @@ def save_checkpoint(model, optimizer, scheduler, iteration, loss, save_dir):
         'params': asdict(model.params)
     }
 
+    # Convert dtype in params to string
+    if 'dtype' in checkpoint['params']:
+        checkpoint['params']['dtype'] = str(checkpoint['params']['dtype'])
+
     checkpoint_path = os.path.join(save_dir, f'checkpoint_iter_{iteration}.pt')
     torch.save(checkpoint, checkpoint_path)
     print(f"\nSaved checkpoint to {checkpoint_path}")
+
+
+def save_config(save_dir, params, args):
+    """Save configuration with proper dtype handling"""
+    config_path = save_dir / 'config.json'
+
+    # Convert ModelArgs to dict and handle dtype
+    model_params = asdict(params)
+    model_params['dtype'] = str(model_params['dtype'])
+
+    # Convert training args to dict
+    training_args = vars(args)
+
+    config = {
+        'model_params': model_params,
+        'training_args': training_args
+    }
+
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+    print(f"Configuration saved to {config_path}")
+
 
 def main():
     # Parse arguments
@@ -216,22 +245,23 @@ def main():
 
     # Setup data directory and load data
     data_dir = get_data_dir(args.dtype)
-    
+
     # Determine max_files based on test_run flag
-    max_files = 2 if args.test_run else (None if args.max_files == -1 else args.max_files)
-    
+    max_files = 2 if args.test_run else (
+        None if args.max_files == -1 else args.max_files)
+
     try:
         # Print memory info before loading
         process = psutil.Process()
-        print("\nInitial system memory:", 
+        print("\nInitial system memory:",
               f"{psutil.virtual_memory().available/1024/1024/1024:.2f} GB")
-        
+
         # Load data with progress
         data = load_preprocessed_data(data_dir, max_files)
         data = torch.tensor(data, dtype=torch.long)
-        
+
         # Print memory info after loading
-        print("Memory usage after data loading:", 
+        print("Memory usage after data loading:",
               f"{process.memory_info().rss/1024/1024/1024:.2f} GB")
 
         # Initialize model parameters
@@ -243,7 +273,8 @@ def main():
 
         # Initialize the model
         model = Llama3(params, tokenizer).to(params.device)
-        print(f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+        print(
+            f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
 
         # Create optimizer and scheduler
         optimizer = torch.optim.AdamW(
@@ -261,16 +292,16 @@ def main():
         )
 
         # Create save directory
-        save_dir = Path(f'models/llama3_{args.dtype}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        save_dir = Path(
+            f'models/llama3_{args.dtype}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # Save configuration
-        config_path = save_dir / 'config.json'
-        with open(config_path, 'w') as f:
-            json.dump({
-                'model_params': asdict(params),
-                'training_args': vars(args)
-            }, f, indent=2)
+        try:
+            save_config(save_dir, params, args)
+        except Exception as e:
+            print(f"Warning: Error saving config: {str(e)}")
+            print("Continuing with training...")
 
         # Training loop
         print("\nStarting training...")
@@ -281,7 +312,7 @@ def main():
         for iter in progress_bar:
             # Get batch and train
             xb, yb = get_batch(data, 'train', args.batch_size,
-                              params.max_seq_len, params.device)
+                               params.max_seq_len, params.device)
             logits, loss = model(xb, targets=yb)
 
             optimizer.zero_grad(set_to_none=True)
@@ -311,12 +342,12 @@ def main():
                 if losses['val'] < best_val_loss:
                     best_val_loss = losses['val']
                     save_checkpoint(model, optimizer, scheduler,
-                                 iter, losses['val'], save_dir)
+                                    iter, losses['val'], save_dir)
 
             # Regular checkpoint saving
             if iter % args.save_interval == 0 and iter > 0:
                 save_checkpoint(model, optimizer, scheduler,
-                             iter, loss.item(), save_dir)
+                                iter, loss.item(), save_dir)
 
         # Save final model
         final_path = save_dir / 'final_model.pt'
@@ -328,7 +359,10 @@ def main():
         print("\nTraining interrupted by user")
     except Exception as e:
         print(f"\nError during training: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise
+
 
 if __name__ == "__main__":
     main()
