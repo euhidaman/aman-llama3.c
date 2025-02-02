@@ -138,7 +138,7 @@ class Attention(nn.Module):
             math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask
-        scores = F.softmax(scores.float(), dim=-1).to(params.dtype)
+        scores = F.softmax(scores.float(), dim=-1).to(x.dtype)
         output = torch.matmul(scores, values)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
@@ -194,7 +194,7 @@ class TransformerBlock(nn.Module):
         training=False,
     ):
         h = x + F.dropout(self.attention(self.attention_norm(x), freqs_cis,
-                          mask, start_pos), p=self.dropout_rate, training=training)
+                                         mask, start_pos), p=self.dropout_rate, training=training)
         out = h + F.dropout(self.feed_forward(self.ffn_norm(h)),
                             p=self.dropout_rate, training=training)
         return out
@@ -299,48 +299,67 @@ class Llama3(nn.Module):
         tokens = tokens.unsqueeze(0)  # Add batch dimension
 
         start_pos = 0
-        for _ in range(max_gen_len):
-            logits = self.forward_inference(
-                tokens[:, -self.max_seq_len:], start_pos)
-            logits = logits[:, -1:, :]  # Keep only the last token's logits
-            logits = logits.float()  # Convert to float32 for sampling
+        with torch.amp.autocast(device_type=self.params.device, dtype=self.dtype):
+            for _ in range(max_gen_len):
+                logits = self.forward_inference(
+                    tokens[:, -self.max_seq_len:], start_pos)
+                logits = logits[:, -1:, :]  # Keep only the last token's logits
 
-            if temperature > 0:
-                probs = torch.softmax(logits / temperature, dim=-1)
-                next_token = self._sample_top_p_top_k(probs, top_p, top_k)
-            else:
-                next_token = torch.argmax(logits, dim=-1)
+                # Convert logits to float32 for sampling
+                logits = logits.float()
 
-            tokens = torch.cat([tokens, next_token], dim=1)
-            start_pos += 1
+                if temperature > 0:
+                    probs = torch.softmax(logits / temperature, dim=-1)
+                    next_token = self._sample_top_p_top_k(
+                        probs, top_p, top_k).to(self.dtype)
+                else:
+                    next_token = torch.argmax(logits, dim=-1)
 
-            if next_token.item() == self.tokenizer.eos_id:
-                break
+                tokens = torch.cat([tokens, next_token], dim=1)
+                start_pos += 1
+
+                if next_token.item() == self.tokenizer.eos_id:
+                    break
 
         generated_tokens = tokens[0].tolist()  # Remove batch dimension
         generated_text = self.tokenizer.decode(generated_tokens)
         return generated_text
 
     def _sample_top_p_top_k(self, probs, top_p, top_k=None):
-        probs = probs.squeeze(0)  # Remove batch dimension
+        """Sample from the distribution with top-p and top-k filtering"""
+        probs = probs.float().squeeze(0).squeeze(
+            0)  # Remove batch and sequence dimensions
 
         if top_k is not None:
-            values, indices = torch.topk(probs, top_k)
-            probs[indices[-1]] = 0
-            probs = probs / probs.sum()  # Renormalize
+            values, indices = torch.topk(probs, min(top_k, probs.size(-1)))
+            probs = torch.zeros_like(probs).scatter_(0, indices, values)
 
         if top_p < 1.0:
             sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+
+            # Remove tokens with cumulative probability above the threshold
             sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[0] = False  # Keep at least one token
+
+            # Shift the indices to the right to keep also the first token above the threshold
+            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+            sorted_indices_to_remove[0] = False
+
             indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            probs[indices_to_remove] = 0
-            probs = probs / probs.sum()  # Renormalize
+            probs[indices_to_remove] = 0.0
+
+        # Renormalize the probabilities
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
+        else:
+            # If all probabilities are zero, set uniform distribution
+            probs = torch.ones_like(probs) / probs.size(0)
 
         # Sample from the filtered distribution
         next_token = torch.multinomial(probs, num_samples=1)
-        return next_token.unsqueeze(0)  # Add batch dimension back
+
+        # Add batch and sequence dimensions back
+        return next_token.unsqueeze(0).unsqueeze(0)
 
     def save_pretrained(self, save_directory: str):
         """Save model weights and configuration"""
@@ -367,7 +386,6 @@ class Llama3(nn.Module):
             "max_seq_len": self.params.max_seq_len,
             "dropout_rate": self.params.dropout_rate,
             "rope_theta": self.params.rope_theta,
-            # Convert dtype to string for JSON serialization
             "dtype": str(self.dtype)
         }
 
@@ -381,8 +399,7 @@ class Llama3(nn.Module):
 
     @classmethod
     def from_pretrained(cls, load_directory: str, device=None):
-        """
-        Load a pretrained model from a directory.
+        """Load a pretrained model from a directory.
 
         Args:
             load_directory (str): Path to the directory containing the model files
@@ -401,113 +418,62 @@ class Llama3(nn.Module):
         import json
         from tokenizer import Tokenizer
 
-        try:
-            # Verify directory exists
-            if not os.path.exists(load_directory):
-                raise FileNotFoundError(
-                    f"Directory not found: {load_directory}")
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-            # Load configuration
-            config_path = os.path.join(load_directory, "config.json")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(
-                    f"Config file not found: {config_path}")
+        # Load configuration
+        config_path = os.path.join(load_directory, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found: {config_path}")
 
-            with open(config_path, "r") as f:
-                config = json.load(f)
+        with open(config_path, "r") as f:
+            config = json.load(f)
 
-            # Convert string dtype back to torch.dtype
-            dtype_str = config.pop("dtype")
-            dtype_map = {
-                "torch.float16": torch.float16,
-                "torch.bfloat16": torch.bfloat16,
-                "torch.float32": torch.float32,
-                "float16": torch.float16,
-                "bfloat16": torch.bfloat16,
-                "float32": torch.float32
-            }
+        # Convert string dtype back to torch.dtype
+        dtype_str = config.pop("dtype")
+        dtype_map = {
+            "torch.float16": torch.float16,
+            "torch.bfloat16": torch.bfloat16,
+            "torch.float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32
+        }
 
-            if dtype_str not in dtype_map:
-                raise ValueError(f"Unsupported dtype: {dtype_str}. "
-                                 f"Supported dtypes: {list(dtype_map.keys())}")
+        if dtype_str not in dtype_map:
+            raise ValueError(f"Unsupported dtype: {dtype_str}. "
+                             f"Supported dtypes: {list(dtype_map.keys())}")
 
-            dtype = dtype_map[dtype_str]
+        dtype = dtype_map[dtype_str]
 
-            # Determine device
-            if device is None:
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # Create ModelArgs instance with loaded config
+        from params import ModelArgs
+        model_args = ModelArgs(device=device, dtype=dtype, **config)
 
-            # Create ModelArgs instance with loaded config
-            from params import ModelArgs  # Local import to avoid circular dependency
+        # Initialize tokenizer
+        tokenizer_path = os.path.join(
+            load_directory, f"tokenizer_{config['vocab_size']}_{dtype_str.split('.')[-1]}.model")
+        if not os.path.exists(tokenizer_path):
+            raise FileNotFoundError(f"Tokenizer not found: {tokenizer_path}")
 
-            model_args = ModelArgs(
-                device=device,
-                dtype=dtype,
-                **config
-            )
+        tokenizer = Tokenizer(tokenizer_path)
 
-            # Initialize tokenizer
-            tokenizer_base = f"tokenizer_{config['vocab_size']}"
-            possible_tokenizer_names = [
-                f"{tokenizer_base}_{dtype_str.split('.')[-1]}.model",
-                f"{tokenizer_base}.model"
-            ]
+        # Create model instance
+        model = cls(model_args, tokenizer)
 
-            tokenizer_path = None
-            for token_name in possible_tokenizer_names:
-                temp_path = os.path.join(load_directory, token_name)
-                if os.path.exists(temp_path):
-                    tokenizer_path = temp_path
-                    break
+        # Load weights
+        model_path = os.path.join(load_directory, "model.pth")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model weights not found: {model_path}")
 
-            if tokenizer_path is None:
-                raise FileNotFoundError(
-                    f"Tokenizer not found. Tried:\n" +
-                    "\n".join(f"- {os.path.join(load_directory, name)}"
-                              for name in possible_tokenizer_names)
-                )
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict)
 
-            print(f"Loading tokenizer from: {tokenizer_path}")
-            tokenizer = Tokenizer(tokenizer_path)
+        # Move model to device and set to eval mode
+        model = model.to(device)
+        model.eval()
 
-            # Create model instance
-            print(f"Initializing model with dtype={dtype} on device={device}")
-            model = cls(model_args, tokenizer)
-
-            # Load weights
-            model_path = os.path.join(load_directory, "model.pth")
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(
-                    f"Model weights not found: {model_path}")
-
-            try:
-                state_dict = torch.load(model_path, map_location=device)
-                model.load_state_dict(state_dict)
-            except Exception as e:
-                raise RuntimeError(f"Failed to load model weights: {str(e)}")
-
-            # Move model to device and set to eval mode
-            model = model.to(device)
-            model.eval()
-
-            # Print model information
-            print("\nModel successfully loaded:")
-            print(f"- Directory: {load_directory}")
-            print(f"- Device: {device}")
-            print(f"- Dtype: {dtype}")
-            print(f"- Vocab size: {config['vocab_size']}")
-            print(f"- Sequence length: {config['max_seq_len']}")
-            print(f"- Number of layers: {config['n_layers']}")
-            print(f"- Number of heads: {config['n_heads']}")
-            print(f"- Model dimension: {config['dim']}")
-
-            return model
-
-        except Exception as e:
-            print(f"\nError loading model from {load_directory}")
-            print(f"Error type: {type(e).__name__}")
-            print(f"Error message: {str(e)}")
-            raise
+        return model
 
     def get_model_size(self):
         """Calculate and return model size in millions of parameters"""
