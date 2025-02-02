@@ -17,6 +17,8 @@ from pathlib import Path
 import psutil
 from tqdm import tqdm
 import warnings
+from torch.cuda.amp import autocast, GradScaler
+from torch.nn.utils import clip_grad_norm_
 
 # Suppress complex values warning
 warnings.filterwarnings(
@@ -37,8 +39,8 @@ def setup_args():
                         help='how often to evaluate the model (default: 100)')
     parser.add_argument('--save_interval', type=int, default=500,
                         help='how often to save checkpoints (default: 500)')
-    parser.add_argument('--lr', type=float, default=1e-2,
-                        help='initial learning rate (default: 1e-2)')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='initial learning rate (default: 1e-4)')
     parser.add_argument('--min_lr', type=float, default=1e-5,
                         help='minimum learning rate (default: 1e-5)')
     parser.add_argument('--weight_decay', type=float, default=0.02,
@@ -177,7 +179,8 @@ def estimate_loss(model, data, batch_size, eval_iters=5):
         for k in range(eval_iters):
             X, Y = get_batch(data, split, batch_size,
                              model.max_seq_len, model.params.device)
-            logits, loss = model(X, targets=Y)
+            with autocast():
+                logits, loss = model(X, targets=Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -276,15 +279,17 @@ def main():
 
         # Initialize model parameters
         params = ModelArgs()
-        params.dtype = dtype  # Set dtype in params
+        params.dtype = dtype
 
         print("\nModel Configuration:")
         print("-" * 50)
         for key, value in asdict(params).items():
             print(f"{key}: {value}")
 
-        # Initialize the model with correct dtype
-        model = Llama3(params, tokenizer).to(device=params.device, dtype=dtype)
+        # Initialize the model with correct dtype and gradient scaler
+        model = Llama3(params, tokenizer).to(params.device)
+        scaler = GradScaler()
+
         print(
             f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
 
@@ -325,11 +330,21 @@ def main():
             # Get batch and train
             xb, yb = get_batch(data, 'train', args.batch_size,
                                params.max_seq_len, params.device)
-            logits, loss = model(xb, targets=yb)
 
+            # Use mixed precision training
+            with autocast():
+                logits, loss = model(xb, targets=yb)
+
+            # Modified backward pass with gradient scaling
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+
+            # Clip gradients
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # Step with scaler
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
 
             # Update progress bar
@@ -373,8 +388,33 @@ def main():
         print(f"\nError during training: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise
+        raise  # Re-raise the exception after printing traceback
 
 
 if __name__ == "__main__":
-    main()
+    # Handle CUDA memory settings
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.backends.cudnn.benchmark = True
+        # Set TF32 for better performance on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+        # Print CUDA information
+        print(f"CUDA Device: {torch.cuda.get_device_name()}")
+        print(f"CUDA Version: {torch.version.cuda}")
+        print(
+            f"Available CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+
+        # Set autocast dtype
+        torch.set_float32_matmul_precision('high')
+    else:
+        print("CUDA is not available. Training will be slow on CPU.")
+
+    try:
+        main()
+    except Exception as e:
+        print(f"\nFatal error during execution: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
