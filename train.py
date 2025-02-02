@@ -17,7 +17,7 @@ from pathlib import Path
 import psutil
 from tqdm import tqdm
 import warnings
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 # Suppress complex values warning
@@ -179,7 +179,7 @@ def estimate_loss(model, data, batch_size, eval_iters=5):
         for k in range(eval_iters):
             X, Y = get_batch(data, split, batch_size,
                              model.max_seq_len, model.params.device)
-            with autocast():
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=model.params.dtype == torch.float16):
                 logits, loss = model(X, targets=Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -286,9 +286,10 @@ def main():
         for key, value in asdict(params).items():
             print(f"{key}: {value}")
 
-        # Initialize the model with correct dtype and gradient scaler
-        model = Llama3(params, tokenizer).to(params.device)
-        scaler = GradScaler()
+        # Initialize the model with correct dtype
+        model = Llama3(params, tokenizer).to(device=params.device)
+        # Convert model parameters to float32 for training stability
+        model = model.float()
 
         print(
             f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
@@ -307,6 +308,9 @@ def main():
             args.min_lr,
             args.lr
         )
+
+        # Initialize gradient scaler for mixed precision training
+        scaler = GradScaler(enabled=args.dtype == 'float16')
 
         # Create save directory
         save_dir = Path(
@@ -331,20 +335,26 @@ def main():
             xb, yb = get_batch(data, 'train', args.batch_size,
                                params.max_seq_len, params.device)
 
-            # Use mixed precision training
-            with autocast():
+            # Use torch.amp.autocast instead of deprecated cuda.amp.autocast
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=args.dtype == 'float16'):
                 logits, loss = model(xb, targets=yb)
 
             # Modified backward pass with gradient scaling
             optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
 
-            # Clip gradients
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                # Clip gradients
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Step with scaler
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-            # Step with scaler
-            scaler.step(optimizer)
-            scaler.update()
             scheduler.step()
 
             # Update progress bar
@@ -388,7 +398,7 @@ def main():
         print(f"\nError during training: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise  # Re-raise the exception after printing traceback
+        raise
 
 
 if __name__ == "__main__":
