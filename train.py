@@ -53,6 +53,10 @@ def setup_args():
                         help='maximum number of files to load (default: 5, use -1 for all files)')
     parser.add_argument('--test_run', action='store_true',
                         help='run with minimal data for testing')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4,
+                        help='Number of steps to accumulate gradients (default: 4)')
+    parser.add_argument('--max_grad_norm', type=float, default=1.0,
+                        help='Maximum gradient norm for clipping (default: 1.0)')
     return parser.parse_args()
 
 
@@ -259,10 +263,6 @@ def main():
     # Setup data directory and load data
     data_dir = get_data_dir(args.dtype)
 
-    # Determine max_files based on test_run flag
-    max_files = 2 if args.test_run else (
-        None if args.max_files == -1 else args.max_files)
-
     try:
         # Print memory info before loading
         process = psutil.Process()
@@ -270,7 +270,7 @@ def main():
               f"{psutil.virtual_memory().available/1024/1024/1024:.2f} GB")
 
         # Load data with progress
-        data = load_preprocessed_data(data_dir, max_files)
+        data = load_preprocessed_data(data_dir, args.max_files)
         data = torch.from_numpy(data).to(torch.long)
 
         # Print memory info after loading
@@ -286,19 +286,19 @@ def main():
         for key, value in asdict(params).items():
             print(f"{key}: {value}")
 
-        # Initialize the model with correct dtype
-        model = Llama3(params, tokenizer).to(device=params.device)
-        # Convert model parameters to float32 for training stability
-        model = model.float()
+        # Initialize model and move to device
+        model = Llama3(params, tokenizer).to(params.device)
+        model = model.float()  # Convert to float32 for stability
 
         print(
             f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
 
-        # Create optimizer and scheduler
+        # Initialize optimizer and scheduler
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=args.lr,
-            weight_decay=args.weight_decay
+            weight_decay=args.weight_decay,
+            eps=1e-8  # Added eps for numerical stability
         )
 
         scheduler = create_lr_scheduler(
@@ -312,7 +312,7 @@ def main():
         # Initialize gradient scaler for mixed precision training
         scaler = GradScaler(enabled=args.dtype == 'float16')
 
-        # Create save directory
+        # Create save directory with timestamp
         save_dir = Path(
             f'models/llama3_{args.dtype}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -328,63 +328,93 @@ def main():
         print("\nStarting training...")
         start_time = time.time()
         best_val_loss = float('inf')
+        accumulated_loss = 0
 
         progress_bar = tqdm(range(args.max_iters), desc="Training")
         for iter in progress_bar:
-            # Get batch and train
-            xb, yb = get_batch(data, 'train', args.batch_size,
-                               params.max_seq_len, params.device)
+            try:
+                # Memory management at start of iteration
+                if iter % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            # Use torch.amp.autocast instead of deprecated cuda.amp.autocast
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=args.dtype == 'float16'):
-                logits, loss = model(xb, targets=yb)
+                # Zero gradients at start of accumulation
+                if iter % args.gradient_accumulation_steps == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                    accumulated_loss = 0
 
-            # Modified backward pass with gradient scaling
-            optimizer.zero_grad(set_to_none=True)
+                # Get batch and train
+                xb, yb = get_batch(data, 'train', args.batch_size,
+                                   params.max_seq_len, params.device)
 
-            if scaler.is_enabled():
-                scaler.scale(loss).backward()
-                # Clip gradients
-                scaler.unscale_(optimizer)
-                clip_grad_norm_(model.parameters(), max_norm=1.0)
-                # Step with scaler
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                # Forward pass with autocast
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=args.dtype == 'float16'):
+                    logits, loss = model(xb, targets=yb)
+                    loss = loss / args.gradient_accumulation_steps
+                    accumulated_loss += loss.item()
 
-            scheduler.step()
+                # Backward pass
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
-            })
+                # Step optimizer after accumulation
+                if (iter + 1) % args.gradient_accumulation_steps == 0:
+                    if scaler.is_enabled():
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), args.max_grad_norm)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), args.max_grad_norm)
+                        optimizer.step()
 
-            # Evaluation
-            if iter % args.eval_interval == 0 or iter == args.max_iters - 1:
-                losses = estimate_loss(model, data, args.batch_size)
-                current_lr = optimizer.param_groups[0]['lr']
-                elapsed = time.time() - start_time
+                    scheduler.step()
 
-                print(f"\niter {iter:,}/{args.max_iters:,} | "
-                      f"lr {current_lr:.2e} | "
-                      f"train loss {losses['train']:.4f} | "
-                      f"val loss {losses['val']:.4f} | "
-                      f"elapsed {elapsed:.2f}s")
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': f'{accumulated_loss:.4f}',
+                    'lr': f'{optimizer.param_groups[0]["lr"]:.2e}'
+                })
 
-                # Save best model
-                if losses['val'] < best_val_loss:
-                    best_val_loss = losses['val']
+                # Evaluation
+                if iter % args.eval_interval == 0:
+                    model.eval()
+                    with torch.no_grad():
+                        losses = estimate_loss(model, data, args.batch_size)
+                    model.train()
+
+                    current_lr = optimizer.param_groups[0]['lr']
+                    elapsed = time.time() - start_time
+
+                    print(f"\niter {iter:,}/{args.max_iters:,} | "
+                          f"lr {current_lr:.2e} | "
+                          f"train loss {losses['train']:.4f} | "
+                          f"val loss {losses['val']:.4f} | "
+                          f"elapsed {elapsed:.2f}s")
+
+                    # Save best model
+                    if losses['val'] < best_val_loss:
+                        best_val_loss = losses['val']
+                        save_checkpoint(model, optimizer, scheduler,
+                                        iter, losses['val'], save_dir)
+
+                # Regular checkpoint saving
+                if iter % args.save_interval == 0 and iter > 0:
                     save_checkpoint(model, optimizer, scheduler,
-                                    iter, losses['val'], save_dir)
+                                    iter, accumulated_loss, save_dir)
 
-            # Regular checkpoint saving
-            if iter % args.save_interval == 0 and iter > 0:
-                save_checkpoint(model, optimizer, scheduler,
-                                iter, loss.item(), save_dir)
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    print(
+                        f"\nOOM error in iteration {iter}. Trying to recover...")
+                    continue
+                else:
+                    raise e
 
         # Save final model
         final_path = save_dir / 'final_model.pt'
@@ -394,11 +424,12 @@ def main():
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
+        sys.exit(0)
     except Exception as e:
         print(f"\nError during training: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -406,7 +437,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.backends.cudnn.benchmark = True
-        # Set TF32 for better performance on Ampere GPUs
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
