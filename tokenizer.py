@@ -1,3 +1,5 @@
+# tokenizer.py
+
 import argparse
 import array
 import os
@@ -23,21 +25,12 @@ DATA_CACHE_DIR = "data"
 def load_tokenizer_model(model_path):
     """Load a tokenizer model from a file."""
     vocab = {}
-    dtype = 'float32'  # default dtype
     with open(model_path, 'r', encoding='utf-8') as f:
-        # Check first line for dtype information
-        first_line = f.readline().strip()
-        if first_line.startswith('#dtype='):
-            dtype = first_line[7:]  # Extract dtype value
-        else:
-            # If no dtype header, rewind to start of file
-            f.seek(0)
-
         for line in f:
             token_b64, rank = line.strip().split()
             token = base64.b64decode(token_b64)
             vocab[token] = int(rank)
-    return vocab, dtype
+    return vocab
 
 
 class Tokenizer:
@@ -47,8 +40,8 @@ class Tokenizer:
         model_path = tokenizer_model if tokenizer_model else TOKENIZER_MODEL
         assert os.path.isfile(model_path), model_path
 
-        # Load the vocabulary and dtype using our custom loader
-        mergeable_ranks, self.dtype = load_tokenizer_model(model_path)
+        # Load the vocabulary using our custom loader
+        mergeable_ranks = load_tokenizer_model(model_path)
         self.model_path = model_path
 
         # BOS / EOS token IDs
@@ -113,33 +106,13 @@ class Tokenizer:
             t = t[:-1]
         return self.model.decode(t)
 
-    def export(self, dtype_str=None):
-        """
-        Export the tokenizer with the specified data type.
-        Args:
-            dtype_str (str): The data type to use ('float16', 'bfloat16', or 'float32')
-        """
-        # Use provided dtype_str or fall back to instance dtype
-        dtype_str = dtype_str or self.dtype
-
-        # Map dtype strings to numpy dtypes
-        dtype_map = {
-            'float16': np.float16,
-            'bfloat16': np.float32,  # numpy doesn't directly support bfloat16
-            'float32': np.float32
-        }
-
-        if dtype_str not in dtype_map:
-            raise ValueError(
-                f"Unsupported dtype: {dtype_str}. Must be one of {list(dtype_map.keys())}")
-
-        dtype = dtype_map[dtype_str]
-
-        # get all the tokens (postprocessed) and their scores
+    def export(self):
+        # get all the tokens (postprocessed) and their scores as floats
         tokens, scores = [], []
         for i in range(self.n_words):
+            # decode the token and light postprocessing
             t = self.model.decode_single_token_bytes(i)
-            s = np.array(i, dtype=dtype).item()
+            s = i
             tokens.append(t)
             scores.append(s)
 
@@ -147,32 +120,21 @@ class Tokenizer:
         max_token_length = max(len(t) for t in tokens)
 
         # write to a binary file
-        tokenizer_bin = self.model_path.replace(".model", f"_{dtype_str}.bin")
+        # the tokenizer.bin file is the same as .model file, but .bin
+        tokenizer_bin = self.model_path.replace(".model", ".bin")
         with open(tokenizer_bin, "wb") as f:
             f.write(struct.pack("I", max_token_length))
-            pack_format = 'fI' if dtype == np.float32 else 'eI'  # 'e' for float16
             for bytes, score in zip(tokens, scores):
-                f.write(struct.pack(pack_format, score, len(bytes)))
+                f.write(struct.pack("fI", score, len(bytes)))
                 f.write(bytes)
-
-        print(f"Exported tokenizer with {dtype_str} to {tokenizer_bin}")
 
     @staticmethod
     def train_vocab(corpus_dir: str, vocab_size: int, dtype: str = 'float32'):
-        """
-        Train a new vocabulary of the specified size on the given corpus directory
-        Args:
-            corpus_dir (str): Directory containing the corpus
-            vocab_size (int): Size of vocabulary to train
-            dtype (str): Data type to use ('float16', 'bfloat16', or 'float32')
-        """
-        print(f"Starting tokenizer training with dtype: {dtype}...")
-
-        # Validate dtype
-        valid_dtypes = ['float16', 'bfloat16', 'float32']
-        if dtype not in valid_dtypes:
-            raise ValueError(
-                f"Unsupported dtype: {dtype}. Must be one of {valid_dtypes}")
+        """Train a new vocabulary of the specified size on the given corpus directory"""
+        print(f"\nStarting tokenizer training...")
+        print(f"Vocabulary size: {vocab_size}")
+        print(f"Data type: {dtype}")
+        print(f"Corpus directory: {corpus_dir}")
 
         # Get first 10 shards as requested
         shard_files = sorted(
@@ -233,12 +195,10 @@ class Tokenizer:
                        (token, freq) in enumerate(sorted_tokens[:vocab_size-256])}
         final_vocab.update(base_vocab)
 
-        # Save the vocabulary with dtype information
+        # Save the vocabulary with dtype in filename
         model_path = f"tokenizer_{vocab_size}_{dtype}.model"
         print(f"\nSaving vocabulary to {model_path}...")
         with open(model_path, "w", encoding="utf-8") as f:
-            # Add dtype information as a special first line
-            f.write(f"#dtype={dtype}\n")
             for token, rank in tqdm(final_vocab.items(), desc="Writing vocabulary"):
                 token_b64 = base64.b64encode(token).decode('utf-8')
                 f.write(f"{token_b64} {rank}\n")
@@ -261,29 +221,40 @@ def process_shard(args):
             data = json.load(f)
 
         all_tokens = []
+        num_sequences = 0  # Keep track of number of sequences
+
         for example in tqdm(data, position=shard_id, desc=f"Processing shard {shard_id}"):
-            text = example["story"]
-            text = text.strip()
-            tokens = enc.encode(text, bos=True, eos=False, allowed_special=set(),
+            text = example["story"].strip()
+            # Always add BOS token (1) at the start and EOS at the end
+            tokens = enc.encode(text, bos=True, eos=True, allowed_special=set(),
                                 disallowed_special=set())
             all_tokens.extend(tokens)
+            num_sequences += 1  # Increment sequence counter
 
-        # Convert to uint16 nparray
+        # convert to uint16 nparray
         all_tokens = np.array(all_tokens, dtype=np.uint16)
 
-        # Calculate output filename with dtype
+        # calculate the output filename
         bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}_{dtype}")
         shard_basename = os.path.basename(shard)
         bin_basename = shard_basename.replace(".json", ".bin")
         tokenized_filename = os.path.join(bin_dir, bin_basename)
 
-        # Write the bytes
+        # write the bytes
         os.makedirs(os.path.dirname(tokenized_filename), exist_ok=True)
         with open(tokenized_filename, "wb") as f:
             f.write(all_tokens.tobytes())
 
-        avg_seq_len = all_tokens.size / ((all_tokens == 1).sum())
-        print(f"Saved {tokenized_filename}, average seqlen: {avg_seq_len:.2f}")
+        # calculate the average sequence length safely
+        if num_sequences > 0:
+            avg_seq_len = all_tokens.size / num_sequences
+        else:
+            avg_seq_len = 0
+
+        print(f"Saved {tokenized_filename}")
+        print(f"Total tokens: {all_tokens.size:,}")
+        print(f"Number of sequences: {num_sequences:,}")
+        print(f"Average sequence length: {avg_seq_len:.2f}")
 
     except Exception as e:
         print(f"Error processing shard {shard_id}: {str(e)}")
@@ -293,18 +264,12 @@ def process_shard(args):
 def pretokenize(vocab_size: int, dtype: str = 'float32'):
     """
     Pretokenize the dataset using the specified vocabulary size and dtype
+    
     Args:
         vocab_size (int): Size of vocabulary to use
         dtype (str): Data type to use ('float16', 'bfloat16', or 'float32')
     """
-    # Validate dtype
-    valid_dtypes = ['float16', 'bfloat16', 'float32']
-    if dtype not in valid_dtypes:
-        raise ValueError(
-            f"Unsupported dtype: {dtype}. Must be one of {valid_dtypes}")
-
-    print(f"Starting pretokenization with dtype: {dtype}")
-
+    # iterate the shards and tokenize all of them one by one
     data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
     shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.json")))
 
@@ -312,47 +277,47 @@ def pretokenize(vocab_size: int, dtype: str = 'float32'):
         raise FileNotFoundError(
             f"No JSON files found in {data_dir}. Please make sure the dataset is downloaded and extracted.")
 
-    # Create output directory with dtype in path
+    # create output directory with dtype
     bin_dir = os.path.join(DATA_CACHE_DIR, f"tok{vocab_size}_{dtype}")
     os.makedirs(bin_dir, exist_ok=True)
 
-    # Process all shards in parallel
+    print(f"\nPretokenizing with:")
+    print(f"- Vocabulary size: {vocab_size}")
+    print(f"- Data type: {dtype}")
+    print(f"- Output directory: {bin_dir}")
+    print(f"- Number of shards: {len(shard_filenames)}")
+
+    # process all the shards in parallel
     with ProcessPoolExecutor() as executor:
         args = [(i, shard, vocab_size, dtype)
                 for i, shard in enumerate(shard_filenames)]
         list(executor.map(process_shard, args))
 
-    print(f"Pretokenization completed. Tokenized files are saved in {bin_dir}")
+    print(f"\nPretokenization completed!")
+    print(f"Tokenized files are saved in: {bin_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Add dtype argument to both commands
-    dtype_help = "Data type to use (default: float32)"
-    dtype_choices = ['float16', 'bfloat16', 'float32']
-
     # Train command
     train_parser = subparsers.add_parser("train_vocab")
     train_parser.add_argument("--vocab_size", type=int, required=True)
-    train_parser.add_argument("--dtype", type=str, choices=dtype_choices,
-                              default='float32', help=dtype_help)
+    train_parser.add_argument("--dtype", type=str, choices=['float16', 'bfloat16', 'float32'],
+                              default='float32', help='Data type to use')
 
     # Export command
     export_parser = subparsers.add_parser("export")
     export_parser.add_argument(
         "-t", "--tokenizer-model", type=str, help="optional path to custom tokenizer")
-    export_parser.add_argument("--dtype", type=str, choices=dtype_choices,
-                               default='float32', help=dtype_help)
 
     # Pretokenize command
     pretok_parser = subparsers.add_parser("pretokenize")
     pretok_parser.add_argument(
-        "--vocab_size", type=int, required=True,
-        help="vocabulary size of the tokenizer")
-    pretok_parser.add_argument("--dtype", type=str, choices=dtype_choices,
-                               default='float32', help=dtype_help)
+        "--vocab_size", type=int, required=True, help="vocabulary size of the tokenizer")
+    pretok_parser.add_argument("--dtype", type=str, choices=['float16', 'bfloat16', 'float32'],
+                               default='float32', help='Data type to use')
 
     args = parser.parse_args()
 
@@ -361,6 +326,6 @@ if __name__ == "__main__":
                               args.vocab_size, args.dtype)
     elif args.command == "export":
         t = Tokenizer(args.tokenizer_model)
-        t.export(dtype_str=args.dtype)
+        t.export()
     elif args.command == "pretokenize":
         pretokenize(args.vocab_size, args.dtype)
