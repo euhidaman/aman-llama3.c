@@ -158,10 +158,12 @@ def get_batch(data, split, batch_size, max_seq_len, device):
     data_split = data[:int(0.9 * len(data))
                       ] if split == 'train' else data[int(0.9 * len(data)):]
     ix = torch.randint(len(data_split) - max_seq_len, (batch_size,))
-    x = torch.stack(
-        [torch.from_numpy(data_split[i:i + max_seq_len].copy()) for i in ix])
-    y = torch.stack(
-        [torch.from_numpy(data_split[i + 1:i + max_seq_len + 1].copy()) for i in ix])
+
+    # Use clone() instead of copy() for PyTorch tensors
+    x = torch.stack([data_split[i:i + max_seq_len].clone() for i in ix])
+    y = torch.stack([data_split[i + 1:i + max_seq_len + 1].clone()
+                    for i in ix])
+
     return x.to(device), y.to(device)
 
 
@@ -258,7 +260,8 @@ def main():
 
         # Load data with progress
         data = load_preprocessed_data(data_dir, max_files)
-        data = torch.tensor(data, dtype=torch.long)
+        # Convert numpy array to tensor
+        data = torch.from_numpy(data).to(torch.long)
 
         # Print memory info after loading
         print("Memory usage after data loading:",
