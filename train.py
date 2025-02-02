@@ -153,18 +153,18 @@ def load_preprocessed_data(data_dir, max_files=None):
         return load_data_in_chunks(data_files)
 
 
-def get_batch(data, split, batch_size, max_seq_len, device):
+def get_batch(data, split, batch_size, max_seq_len, device, dtype=None):
     """Generate a batch of data for training or validation"""
     data_split = data[:int(0.9 * len(data))
                       ] if split == 'train' else data[int(0.9 * len(data)):]
     ix = torch.randint(len(data_split) - max_seq_len, (batch_size,))
 
-    # Use clone() instead of copy() for PyTorch tensors
+    # Keep input tokens as long for embedding layer
     x = torch.stack([data_split[i:i + max_seq_len].clone() for i in ix])
     y = torch.stack([data_split[i + 1:i + max_seq_len + 1].clone()
                     for i in ix])
 
-    return x.to(device), y.to(device)
+    return x.to(device).long(), y.to(device).long()
 
 
 @torch.no_grad()
@@ -245,6 +245,14 @@ def main():
     # Parse arguments
     args = setup_args()
 
+    # Set the dtype based on args
+    if args.dtype == 'float16':
+        dtype = torch.float16
+    elif args.dtype == 'bfloat16':
+        dtype = torch.bfloat16
+    else:
+        dtype = torch.float32
+
     # Setup data directory and load data
     data_dir = get_data_dir(args.dtype)
 
@@ -260,7 +268,6 @@ def main():
 
         # Load data with progress
         data = load_preprocessed_data(data_dir, max_files)
-        # Convert numpy array to tensor
         data = torch.from_numpy(data).to(torch.long)
 
         # Print memory info after loading
@@ -269,13 +276,15 @@ def main():
 
         # Initialize model parameters
         params = ModelArgs()
+        params.dtype = dtype  # Set dtype in params
+
         print("\nModel Configuration:")
         print("-" * 50)
         for key, value in asdict(params).items():
             print(f"{key}: {value}")
 
-        # Initialize the model
-        model = Llama3(params, tokenizer).to(params.device)
+        # Initialize the model with correct dtype
+        model = Llama3(params, tokenizer).to(device=params.device, dtype=dtype)
         print(
             f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
 
