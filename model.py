@@ -494,6 +494,71 @@ class Llama3(nn.Module):
 
         return model
 
+    def export_to_c(self, save_directory: str):
+        """Export model weights to binary format for C inference"""
+        import struct
+        import numpy as np
+        from pathlib import Path
+
+        save_directory = Path(save_directory)
+        bin_path = save_directory / "model.bin"
+
+        # First write the config
+        config = {
+            "dim": self.params.dim,  # 128
+            "hidden_dim": self.params.dim * 4,  # 512 (4x the model dimension)
+            "n_layers": self.params.n_layers,  # 12
+            "n_heads": self.params.n_heads,  # 4
+            "n_kv_heads": self.params.n_kv_heads,  # 4 (same as n_heads)
+            "vocab_size": self.params.vocab_size,  # 512
+            "seq_len": self.params.max_seq_len  # 512
+        }
+
+        with open(bin_path, 'wb') as f:
+            # Write config struct
+            for key in ['dim', 'hidden_dim', 'n_layers', 'n_heads', 'n_kv_heads', 'vocab_size', 'seq_len']:
+                f.write(struct.pack('i', config[key]))
+
+            # Get state dict
+            state_dict = self.state_dict()
+
+            # Write weights in the order expected by the C code
+            # Token embeddings
+            token_emb = state_dict['tok_embeddings.weight'].cpu().numpy()
+            token_emb.astype(np.float32).tofile(f)
+
+            # Layers
+            for layer_id in range(self.params.n_layers):
+                prefix = f'layers.{layer_id}.'
+
+                # Attention weights
+                state_dict[prefix +
+                           'attention_norm.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'attention.wq.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'attention.wk.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'attention.wv.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'attention.wo.weight'].cpu().numpy().astype(np.float32).tofile(f)
+
+                # FFN weights
+                state_dict[prefix +
+                           'ffn_norm.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'feed_forward.w1.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'feed_forward.w2.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                state_dict[prefix +
+                           'feed_forward.w3.weight'].cpu().numpy().astype(np.float32).tofile(f)
+
+            # Final norm
+            state_dict['norm.weight'].cpu().numpy().astype(
+                np.float32).tofile(f)
+
+        print(f"Model exported to C binary format: {bin_path}")
+
     def get_model_size(self):
         """Calculate and return model size in millions of parameters"""
         total_params = sum(p.numel() for p in self.parameters())

@@ -417,9 +417,18 @@ def main():
                     raise e
 
         # Save final model
+        # Save final model in PyTorch format
         final_path = save_dir / 'final_model.pt'
         torch.save(model.state_dict(), final_path)
-        print(f"\nTraining completed! Final model saved to {final_path}")
+
+        # Export model to binary format for C inference
+        binary_path = save_dir / 'model.bin'
+        model.export_to_c(save_dir)  # This will create model.bin
+
+        print(f"\nTraining completed!")
+        print(f"Models saved to:")
+        print(f"- PyTorch format: {final_path}")
+        print(f"- C binary format: {binary_path}")
         print(f"Best validation loss: {best_val_loss:.4f}")
 
     except KeyboardInterrupt:
