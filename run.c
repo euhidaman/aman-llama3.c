@@ -412,37 +412,55 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
     FILE *file = fopen(tokenizer_path, "rb");
     if (!file)
     {
-        fprintf(stderr, "couldn't load %s\n", tokenizer_path);
+        fprintf(stderr, "Couldn't open tokenizer file: %s\n", tokenizer_path);
         exit(EXIT_FAILURE);
     }
+    printf("Tokenizer file opened successfully.\n");
+
+    // Read max_token_length
     if (fread(&t->max_token_length, sizeof(int), 1, file) != 1)
     {
-        fprintf(stderr, "failed read\n");
+        fprintf(stderr, "Failed to read max_token_length from tokenizer file.\n");
+        fclose(file);
         exit(EXIT_FAILURE);
     }
+    printf("Max token length: %d\n", t->max_token_length);
 
+    // Read vocabulary scores and tokens
     int len;
     for (int i = 0; i < vocab_size; i++)
     {
-        if (fread(t->vocab_scores + i, sizeof(float), 1, file) != 1)
+        if (fread(&t->vocab_scores[i], sizeof(float), 1, file) != 1)
         {
-            fprintf(stderr, "failed read\n");
+            fprintf(stderr, "Failed to read vocab_scores[%d] from tokenizer file.\n", i);
+            fclose(file);
             exit(EXIT_FAILURE);
         }
         if (fread(&len, sizeof(int), 1, file) != 1)
         {
-            fprintf(stderr, "failed read\n");
+            fprintf(stderr, "Failed to read token length for vocab[%d] from tokenizer file.\n", i);
+            fclose(file);
             exit(EXIT_FAILURE);
         }
         t->vocab[i] = (char *)malloc(len + 1);
+        if (!t->vocab[i])
+        {
+            fprintf(stderr, "malloc failed for vocab[%d]\n", i);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
         if (fread(t->vocab[i], len, 1, file) != 1)
         {
-            fprintf(stderr, "failed read\n");
+            fprintf(stderr, "Failed to read token string for vocab[%d] from tokenizer file.\n", i);
+            fclose(file);
             exit(EXIT_FAILURE);
         }
         t->vocab[i][len] = '\0';
+        printf("Loaded token %d: %s (score: %f)\n", i, t->vocab[i], t->vocab_scores[i]);
     }
+
     fclose(file);
+    printf("Tokenizer built successfully.\n");
 }
 
 void free_tokenizer(Tokenizer *t)
