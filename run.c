@@ -650,8 +650,8 @@ int sample(Sampler *sampler, float *logits)
 
 void error_usage()
 {
-    fprintf(stderr, "Usage:   run <checkpoint> [options]\n");
-    fprintf(stderr, "Example: run stories_260K.bin -n 256 -i \"Once upon a time\"\n");
+    fprintf(stderr, "Usage:   run <checkpoint> <tokenizer> [options]\n");
+    fprintf(stderr, "Example: run model.bin tokenizer.bin -n 256 -i \"Once upon a time\"\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(stderr, "  -p <float>  p value in top-p sampling in [0,1] default 0.9\n");
@@ -664,22 +664,25 @@ void error_usage()
 int main(int argc, char *argv[])
 {
     char *checkpoint_path = NULL;
+    char *tokenizer_path = NULL;
     float temperature = 1.0f;
     float topp = 0.9f;
     int steps = 256;
     char *prompt = NULL;
     unsigned long long rng_seed = 0;
 
-    if (argc >= 2)
-    {
-        checkpoint_path = argv[1];
-    }
-    else
+    // Check for minimum number of arguments
+    if (argc < 3)
     {
         error_usage();
     }
 
-    for (int i = 2; i < argc; i += 2)
+    // Parse checkpoint and tokenizer paths
+    checkpoint_path = argv[1];
+    tokenizer_path = argv[2];
+
+    // Parse optional arguments
+    for (int i = 3; i < argc; i += 2)
     {
         if (i + 1 >= argc)
         {
@@ -693,65 +696,80 @@ int main(int argc, char *argv[])
         {
             error_usage();
         }
-        if (argv[i][1] == 't')
+        switch (argv[i][1])
         {
+        case 't':
             temperature = atof(argv[i + 1]);
-        }
-        else if (argv[i][1] == 'p')
-        {
+            break;
+        case 'p':
             topp = atof(argv[i + 1]);
-        }
-        else if (argv[i][1] == 's')
-        {
+            break;
+        case 's':
             rng_seed = atoi(argv[i + 1]);
-        }
-        else if (argv[i][1] == 'n')
-        {
+            break;
+        case 'n':
             steps = atoi(argv[i + 1]);
-        }
-        else if (argv[i][1] == 'i')
-        {
+            break;
+        case 'i':
             prompt = argv[i + 1];
-        }
-        else
-        {
+            break;
+        default:
             error_usage();
         }
     }
 
+    // Set default random seed if not provided
     if (rng_seed <= 0)
+    {
         rng_seed = (unsigned int)time(NULL);
-    if (temperature < 0.0)
-        temperature = 0.0;
-    if (topp < 0.0 || 1.0 < topp)
-        topp = 0.9;
-    if (steps < 0)
-        steps = 0;
+    }
 
+    // Validate temperature and topp values
+    if (temperature < 0.0)
+    {
+        temperature = 0.0;
+    }
+    if (topp < 0.0 || topp > 1.0)
+    {
+        topp = 0.9;
+    }
+
+    // Initialize the transformer model
     Transformer transformer;
     build_transformer(&transformer, checkpoint_path);
+
+    // Adjust steps if necessary
     if (steps == 0 || steps > transformer.config.seq_len)
     {
         steps = transformer.config.seq_len;
     }
 
+    // Initialize the tokenizer
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer, "tokenizer.bin", transformer.config.vocab_size);
+    build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);
 
+    // Initialize the sampler
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
-    // Generate text
+    // Handle empty prompt
     char *empty_prompt = "";
     if (prompt == NULL)
     {
         prompt = empty_prompt;
     }
 
+    // Tokenize the input prompt
     int num_prompt_tokens = 0;
     int *prompt_tokens = (int *)malloc((strlen(prompt) + 3) * sizeof(int));
-    // TODO: Implement encode function based on your tokenizer
-    // encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+    if (prompt_tokens == NULL)
+    {
+        fprintf(stderr, "malloc failed for prompt tokens\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // TODO: Implement the encode function for your tokenizer
+    // encode(&tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
 
     if (num_prompt_tokens < 1)
     {
@@ -759,6 +777,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    // Generate text
     long start = 0;
     int next;
     int token = prompt_tokens[0];
@@ -780,14 +799,16 @@ int main(int argc, char *argv[])
 
         if (next == 1)
         {
-            break;
+            break; // End of sequence token
         }
 
+        // Decode and print the generated token
         char *piece = decode(&tokenizer, token, next);
         safe_printf(piece);
         fflush(stdout);
         token = next;
 
+        // Track time for tokens per second calculation
         if (start == 0)
         {
             start = time(NULL) * 1000;
@@ -795,15 +816,18 @@ int main(int argc, char *argv[])
     }
     printf("\n");
 
+    // Print tokens per second
     if (pos > 1)
     {
         long end = time(NULL) * 1000;
         fprintf(stderr, "achieved tok/s: %f\n", (pos - 1) / (double)(end - start) * 1000);
     }
 
+    // Clean up
     free(prompt_tokens);
     free_sampler(&sampler);
     free_tokenizer(&tokenizer);
     free_transformer(&transformer);
+
     return 0;
 }
