@@ -109,12 +109,22 @@ class Tokenizer:
     def export(self):
         # get all the tokens (postprocessed) and their scores as floats
         tokens, scores = [], []
-        for i in range(self.n_words):
-            # decode the token and light postprocessing
-            t = self.model.decode_single_token_bytes(i)
-            s = i
-            tokens.append(t)
-            scores.append(s)
+
+        # First handle the base tokens (0-255)
+        for i in range(256):
+            tokens.append(bytes([i]))  # single byte tokens
+            scores.append(float(i))    # use the byte value as the score
+
+        # Then handle the learned tokens
+        base_vocab_size = 256
+        for i in range(base_vocab_size, self.n_words):
+            try:
+                t = self.model.decode_single_token_bytes(i)
+                tokens.append(t)
+                scores.append(float(i))
+            except KeyError:
+                # If a token can't be decoded, skip it
+                continue
 
         # record the max token length
         max_token_length = max(len(t) for t in tokens)
@@ -123,10 +133,16 @@ class Tokenizer:
         # the tokenizer.bin file is the same as .model file, but .bin
         tokenizer_bin = self.model_path.replace(".model", ".bin")
         with open(tokenizer_bin, "wb") as f:
-            f.write(struct.pack("I", max_token_length))
-            for bytes, score in zip(tokens, scores):
-                f.write(struct.pack("fI", score, len(bytes)))
-                f.write(bytes)
+            # Write the vocab size and max token length
+            f.write(struct.pack("II", len(tokens), max_token_length))
+
+            # Write each token and its score
+            for bytes_token, score in zip(tokens, scores):
+                f.write(struct.pack("fI", score, len(bytes_token)))
+                f.write(bytes_token)
+
+            print(f"\nExported {len(tokens)} tokens to {tokenizer_bin}")
+            print(f"Max token length: {max_token_length}")
 
     @staticmethod
     def train_vocab(corpus_dir: str, vocab_size: int, dtype: str = 'float32'):
