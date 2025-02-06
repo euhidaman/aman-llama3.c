@@ -209,6 +209,12 @@ class Tokenizer:
         print(f"Least common token appears {sorted_tokens[-1][1]:,} times")
         print(f"Model saved to: {model_path}")
 
+        # Create and export the binary version
+        print("\nExporting binary format...")
+        tokenizer = Tokenizer(model_path)
+        tokenizer.export()
+        print(f"Binary model saved to: {model_path.replace('.model', '.bin')}")
+
 
 def process_shard(args):
     shard_id, shard, vocab_size, dtype = args
@@ -264,7 +270,7 @@ def process_shard(args):
 def pretokenize(vocab_size: int, dtype: str = 'float32'):
     """
     Pretokenize the dataset using the specified vocabulary size and dtype
-    
+
     Args:
         vocab_size (int): Size of vocabulary to use
         dtype (str): Data type to use ('float16', 'bfloat16', or 'float32')
