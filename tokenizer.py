@@ -107,6 +107,7 @@ class Tokenizer:
         return self.model.decode(t)
 
     def export(self):
+        """Export the tokenizer in a binary format compatible with the C code"""
         # get all the tokens (postprocessed) and their scores as floats
         tokens, scores = [], []
 
@@ -129,18 +130,22 @@ class Tokenizer:
         # record the max token length
         max_token_length = max(len(t) for t in tokens)
 
-        # write to a binary file
-        # the tokenizer.bin file is the same as .model file, but .bin
+        # create the binary filename
         tokenizer_bin = self.model_path.replace(".model", ".bin")
+        
         with open(tokenizer_bin, "wb") as f:
-            # Write the vocab size and max token length
-            f.write(struct.pack("II", len(tokens), max_token_length))
-
+            # First write the max_token_length as a 4-byte integer
+            f.write(struct.pack("i", max_token_length))
+            
             # Write each token and its score
-            for bytes_token, score in zip(tokens, scores):
-                f.write(struct.pack("fI", score, len(bytes_token)))
-                f.write(bytes_token)
-
+            for token_bytes, score in zip(tokens, scores):
+                # Write the score as a float32
+                f.write(struct.pack("f", score))
+                # Write the token length as a 4-byte integer
+                f.write(struct.pack("i", len(token_bytes)))
+                # Write the token data
+                f.write(token_bytes)
+                
             print(f"\nExported {len(tokens)} tokens to {tokenizer_bin}")
             print(f"Max token length: {max_token_length}")
 
