@@ -7,6 +7,29 @@ from typing import List, Tuple
 import numpy as np
 
 
+def debug_binary_file(file_path):
+    with open(file_path, 'rb') as f:
+        # Read header
+        max_token_length_bytes = f.read(4)
+        max_token_length = struct.unpack('<i', max_token_length_bytes)[0]
+        print(f"Header bytes: {max_token_length_bytes.hex()}")
+        print(f"Max token length: {max_token_length}")
+
+        # Read first few tokens
+        for i in range(3):  # Show first 3 tokens
+            score_bytes = f.read(4)
+            length_bytes = f.read(4)
+            score = struct.unpack('<f', score_bytes)[0]
+            length = struct.unpack('<i', length_bytes)[0]
+            token_data = f.read(length)
+            print(f"\nToken {i}:")
+            print(f"Score bytes: {score_bytes.hex()}")
+            print(f"Length bytes: {length_bytes.hex()}")
+            print(f"Score: {score}")
+            print(f"Length: {length}")
+            print(f"Token data: {token_data.hex()}")
+
+
 def read_binary_tokenizer(file_path: str) -> Tuple[int, List[Tuple[float, bytes]]]:
     """
     Read and parse the binary tokenizer file.
@@ -144,11 +167,18 @@ def main():
         description='Verify binary tokenizer file structure and content')
     parser.add_argument(
         'file', help='Path to the binary tokenizer file (e.g., tokenizer_512_float32.bin)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Print detailed debug information about the binary file')
     args = parser.parse_args()
 
     if not os.path.exists(args.file):
         print(f"Error: File '{args.file}' not found")
         return
+
+    if args.debug:
+        print("\n=== Debug Information ===")
+        debug_binary_file(args.file)
+        print("\n=== End Debug Information ===\n")
 
     success = verify_binary_structure(args.file)
     if success:
