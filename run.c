@@ -398,6 +398,7 @@ int compare_tokens(const void *a, const void *b)
 
 void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
 {
+    printf("Model config vocab_size: %d\n", vocab_size);
     if (vocab_size <= 0 || vocab_size > 512)
     {
         fprintf(stderr, "Error: Vocabulary size must be between 1 and 512\n");
