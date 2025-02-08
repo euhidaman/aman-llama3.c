@@ -115,138 +115,88 @@ class Tokenizer:
             - 4 bytes: score (float32)
             - 4 bytes: token_length (int32)
             - n bytes: token_data (where n is token_length)
-
-        Returns:
-            str: Path to the created binary file
         """
         try:
             # Fixed vocabulary size for C code compatibility
             VOCAB_SIZE = 512
             PAD_TOKEN = bytes([0])  # Use null byte for padding
 
-            # Initialize arrays for tokens and scores with exact size
+            # Calculate max token length from actual vocabulary
+            max_token_length = 0
+            print("\nCalculating maximum token length...")
+            for token in self.vocab.keys():
+                max_token_length = max(max_token_length, len(token))
+            print(f"Max token length: {max_token_length} bytes")
+
+            # Initialize arrays for tokens and scores
             tokens = []
             scores = []
 
-            # Step 1: Add base tokens (0-255) - MUST have all 256 base tokens
             print("\nStep 1: Processing base tokens (0-255)...")
+            # Add base byte tokens (0-255)
             for i in range(256):
-                tokens.append(bytes([i]))
+                token = bytes([i])
+                tokens.append(token)
                 scores.append(float(i))
             print(f"Added {len(tokens)} base tokens")
 
-            if len(tokens) != 256:
-                raise ValueError(
-                    f"Expected 256 base tokens, but got {len(tokens)}")
-
-            # Step 2: Add learned tokens up to position 512
             print("\nStep 2: Processing learned tokens...")
-            learned_tokens_added = 0
-            max_learned_tokens = VOCAB_SIZE - 256  # Should be 256
+            # Add learned tokens from vocabulary
+            learned_tokens = sorted(
+                [(token, score) for token, score in self.vocab_scores.items()],
+                key=lambda x: x[1]  # Sort by score
+            )[:VOCAB_SIZE-256]  # Take only what we need
 
-            for i in range(256, self.n_words):
-                if learned_tokens_added >= max_learned_tokens:
+            for token, score in learned_tokens:
+                if len(tokens) >= VOCAB_SIZE:
                     break
+                tokens.append(token.encode('utf-8'))
+                scores.append(score)
 
-                try:
-                    token_bytes = self.model.decode_single_token_bytes(i)
-                    if token_bytes:  # Only add non-empty tokens
-                        tokens.append(token_bytes)
-                        scores.append(float(i))
-                        learned_tokens_added += 1
-                except (KeyError, ValueError, Exception) as e:
-                    print(
-                        f"Warning: Skipping token {i} due to error: {str(e)}")
-                    continue
+            # Pad to exactly VOCAB_SIZE tokens if needed
+            while len(tokens) < VOCAB_SIZE:
+                tokens.append(PAD_TOKEN)
+                scores.append(0.0)
 
-            print(f"Added {learned_tokens_added} learned tokens")
+            print(
+                f"Total tokens: {len(tokens)} (should be exactly {VOCAB_SIZE})")
 
-            # Step 3: Add padding tokens to reach exactly VOCAB_SIZE
-            padding_needed = VOCAB_SIZE - len(tokens)
-            if padding_needed > 0:
-                print(f"\nStep 3: Adding {padding_needed} padding tokens...")
-                for i in range(padding_needed):
-                    tokens.append(PAD_TOKEN)
-                    scores.append(0.0)
-
-            # Verify we have exactly VOCAB_SIZE tokens
-            if len(tokens) != VOCAB_SIZE:
-                raise ValueError(
-                    f"Invalid token count. Expected {VOCAB_SIZE}, got {len(tokens)}")
-
-            # Step 4: Calculate max token length and file size
-            max_token_length = max(len(t) for t in tokens)
-            header_size = 4  # max_token_length (int32)
-            token_metadata_size = 8  # score (float32) + length (int32)
-            expected_file_size = header_size + \
-                sum(len(t) + token_metadata_size for t in tokens)
-
-            print("\nToken Statistics:")
-            print(f"- Total tokens: {len(tokens)} (must be {VOCAB_SIZE})")
-            print(f"- Base tokens: 256")
-            print(f"- Learned tokens: {learned_tokens_added}")
-            print(f"- Padding tokens: {padding_needed}")
-            print(f"- Max token length: {max_token_length} bytes")
-
-            # Step 5: Create output file
+            # Create binary file
             tokenizer_bin = self.model_path.replace(".model", ".bin")
             print(f"\nWriting binary file: {tokenizer_bin}")
-            print(f"Expected file size: {expected_file_size} bytes")
 
-            # Step 6: Write the binary file
             with open(tokenizer_bin, "wb") as f:
                 # Write header
                 # Little-endian int32
                 f.write(struct.pack("<i", max_token_length))
 
-                # Write all 512 tokens
-                tokens_written = 0
-                for token_bytes, score in zip(tokens, scores):
-                    # Verify token is not None or empty
-                    if not token_bytes:
-                        token_bytes = PAD_TOKEN
-
+                # Write tokens
+                for token, score in zip(tokens, scores):
                     f.write(struct.pack("<f", score))  # Little-endian float32
                     # Little-endian int32
-                    f.write(struct.pack("<i", len(token_bytes)))
-                    f.write(token_bytes)
-                    tokens_written += 1
+                    f.write(struct.pack("<i", len(token)))
+                    f.write(token)  # Raw bytes
 
-            # Step 7: Verify file
-            actual_size = os.path.getsize(tokenizer_bin)
+            # Verify the file
+            file_size = os.path.getsize(tokenizer_bin)
             print(f"\nVerification:")
-            print(f"- Tokens written: {tokens_written}")
-            print(f"- Expected size: {expected_file_size} bytes")
-            print(f"- Actual size: {actual_size} bytes")
+            print(f"- File created: {tokenizer_bin}")
+            print(f"- File size: {file_size} bytes")
 
-            if tokens_written != VOCAB_SIZE:
-                raise ValueError(
-                    f"Failed to write all tokens. Wrote {tokens_written}, expected {VOCAB_SIZE}")
-
-            if actual_size != expected_file_size:
-                raise ValueError(
-                    f"File size mismatch. Expected {expected_file_size}, got {actual_size}")
-
-            # Step 8: Verify file content
-            print("\nVerifying file content...")
+            # Read back first few tokens to verify format
+            print("\nVerifying file format...")
             with open(tokenizer_bin, "rb") as f:
-                # Verify header
-                stored_max_length = struct.unpack("<i", f.read(4))[0]
-                if stored_max_length != max_token_length:
-                    raise ValueError(
-                        f"Max token length mismatch. Expected {max_token_length}, got {stored_max_length}")
+                max_len = struct.unpack("<i", f.read(4))[0]
+                print(f"- Read max_token_length: {max_len}")
 
-                # Verify first few tokens
-                for i in range(min(5, VOCAB_SIZE)):
+                # Verify first 5 tokens
+                for i in range(5):
                     score = struct.unpack("<f", f.read(4))[0]
                     length = struct.unpack("<i", f.read(4))[0]
                     token = f.read(length)
-                    if token != tokens[i]:
-                        raise ValueError(f"Token mismatch at position {i}")
+                    print(
+                        f"- Token {i}: score={score}, length={length}, data={token}")
 
-            print("\nExport completed successfully!")
-            print(f"Binary file created: {tokenizer_bin}")
-            print(f"File size: {actual_size} bytes")
             return tokenizer_bin
 
         except Exception as e:

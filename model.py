@@ -503,61 +503,73 @@ class Llama3(nn.Module):
         save_directory = Path(save_directory)
         bin_path = save_directory / "model.bin"
 
-        # First write the config
+        # Define config that matches C struct exactly
         config = {
-            "dim": self.params.dim,  # 128
-            "hidden_dim": self.params.dim * 4,  # 512 (4x the model dimension)
-            "n_layers": self.params.n_layers,  # 12
-            "n_heads": self.params.n_heads,  # 4
-            "n_kv_heads": self.params.n_kv_heads,  # 4 (same as n_heads)
-            "vocab_size": self.params.vocab_size,  # 512
-            "seq_len": self.params.max_seq_len  # 512
+            'dim': self.params.dim,                    # 128
+            'n_layers': self.params.n_layers,          # 12
+            'n_heads': self.params.n_heads,            # 4
+            # 4 (same as n_heads if not specified)
+            'n_kv_heads': self.params.n_heads,
+            'vocab_size': 512,                         # must be exactly 512
+            'seq_len': self.params.max_seq_len,        # 512
+            'norm_eps': self.params.norm_eps,          # 1e-5
+            # 512 (4x the model dimension)
+            'hidden_dim': self.params.dim * 4,
+            'multiple_of': self.params.multiple_of,    # 256
+            'rope_theta': self.params.rope_theta,      # 10000.0
         }
 
+        print(f"\nExporting model to {bin_path}")
+        print("\nConfiguration being exported:")
+        for k, v in config.items():
+            print(f"- {k}: {v}")
+
         with open(bin_path, 'wb') as f:
-            # Write config struct
-            for key in ['dim', 'hidden_dim', 'n_layers', 'n_heads', 'n_kv_heads', 'vocab_size', 'seq_len']:
-                f.write(struct.pack('i', config[key]))
+            # Write config struct - must match C exactly
+            f.write(struct.pack('i', config['dim']))
+            f.write(struct.pack('i', config['n_layers']))
+            f.write(struct.pack('i', config['n_heads']))
+            f.write(struct.pack('i', config['n_kv_heads']))
+            f.write(struct.pack('i', config['vocab_size']))
+            f.write(struct.pack('i', config['seq_len']))
+            f.write(struct.pack('f', config['norm_eps']))
+            f.write(struct.pack('i', config['hidden_dim']))
+            f.write(struct.pack('i', config['multiple_of']))
+            f.write(struct.pack('f', config['rope_theta']))
 
             # Get state dict
             state_dict = self.state_dict()
 
             # Write weights in the order expected by the C code
+            def write_tensor(tensor):
+                tensor = tensor.cpu().detach().numpy().astype(np.float32)
+                tensor.tofile(f)
+
             # Token embeddings
-            token_emb = state_dict['tok_embeddings.weight'].cpu().numpy()
-            token_emb.astype(np.float32).tofile(f)
+            write_tensor(state_dict['tok_embeddings.weight'])
 
             # Layers
-            for layer_id in range(self.params.n_layers):
+            for layer_id in range(config['n_layers']):
                 prefix = f'layers.{layer_id}.'
 
                 # Attention weights
-                state_dict[prefix +
-                           'attention_norm.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'attention.wq.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'attention.wk.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'attention.wv.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'attention.wo.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                write_tensor(state_dict[prefix + 'attention_norm.weight'])
+                write_tensor(state_dict[prefix + 'attention.wq.weight'])
+                write_tensor(state_dict[prefix + 'attention.wk.weight'])
+                write_tensor(state_dict[prefix + 'attention.wv.weight'])
+                write_tensor(state_dict[prefix + 'attention.wo.weight'])
 
                 # FFN weights
-                state_dict[prefix +
-                           'ffn_norm.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'feed_forward.w1.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'feed_forward.w2.weight'].cpu().numpy().astype(np.float32).tofile(f)
-                state_dict[prefix +
-                           'feed_forward.w3.weight'].cpu().numpy().astype(np.float32).tofile(f)
+                write_tensor(state_dict[prefix + 'ffn_norm.weight'])
+                write_tensor(state_dict[prefix + 'feed_forward.w1.weight'])
+                write_tensor(state_dict[prefix + 'feed_forward.w2.weight'])
+                write_tensor(state_dict[prefix + 'feed_forward.w3.weight'])
 
             # Final norm
-            state_dict['norm.weight'].cpu().numpy().astype(
-                np.float32).tofile(f)
+            write_tensor(state_dict['norm.weight'])
 
-        print(f"Model exported to C binary format: {bin_path}")
+        print(f"\nModel exported successfully to {bin_path}")
+        print(f"File size: {bin_path.stat().st_size / 1024 / 1024:.2f} MB")
 
     def get_model_size(self):
         """Calculate and return model size in millions of parameters"""
