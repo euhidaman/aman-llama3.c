@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #endif
 
+#define VOCAB_SIZE 512
 // ----------------------------------------------------------------------------
 // Transformer model configuration based on params.py
 
@@ -397,6 +398,12 @@ int compare_tokens(const void *a, const void *b)
 
 void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
 {
+    if (vocab_size != 512)
+    {
+        fprintf(stderr, "Error: Vocabulary size must be 512\n");
+        exit(EXIT_FAILURE);
+    }
+
     t->vocab_size = vocab_size;
     printf("Initializing tokenizer with vocab_size: %d\n", vocab_size); // Debug print
 

@@ -107,51 +107,163 @@ class Tokenizer:
         return self.model.decode(t)
 
     def export(self):
-        """Export the tokenizer in a binary format compatible with the C code"""
-        # get all the tokens (postprocessed) and their scores as floats
-        tokens, scores = [], []
+        """
+        Export the tokenizer in a binary format compatible with the C code.
+        The binary format structure is:
+        - 4 bytes: max_token_length (int32)
+        - For each token (exactly 512 tokens):
+            - 4 bytes: score (float32)
+            - 4 bytes: token_length (int32)
+            - n bytes: token_data (where n is token_length)
 
-        # First handle the base tokens (0-255)
-        for i in range(256):
-            tokens.append(bytes([i]))  # single byte tokens
-            scores.append(float(i))    # use the byte value as the score
+        Returns:
+            str: Path to the created binary file
+        """
+        try:
+            # Fixed vocabulary size for C code compatibility
+            VOCAB_SIZE = 512
+            PAD_TOKEN = bytes([0])  # Use null byte for padding
 
-        # Then handle the learned tokens
-        base_vocab_size = 256
-        for i in range(base_vocab_size, self.n_words):
-            try:
-                t = self.model.decode_single_token_bytes(i)
-                tokens.append(t)
+            # Initialize arrays for tokens and scores with exact size
+            tokens = []
+            scores = []
+
+            # Step 1: Add base tokens (0-255) - MUST have all 256 base tokens
+            print("\nStep 1: Processing base tokens (0-255)...")
+            for i in range(256):
+                tokens.append(bytes([i]))
                 scores.append(float(i))
-            except KeyError:
-                # If a token can't be decoded, skip it
-                continue
+            print(f"Added {len(tokens)} base tokens")
 
-        # record the max token length
-        max_token_length = max(len(t) for t in tokens)
+            if len(tokens) != 256:
+                raise ValueError(
+                    f"Expected 256 base tokens, but got {len(tokens)}")
 
-        # create the binary filename
-        tokenizer_bin = self.model_path.replace(".model", ".bin")
-        
-        with open(tokenizer_bin, "wb") as f:
-            # First write the max_token_length as a 4-byte integer
-            f.write(struct.pack("i", max_token_length))
-            
-            # Write each token and its score
-            for token_bytes, score in zip(tokens, scores):
-                # Write the score as a float32
-                f.write(struct.pack("f", score))
-                # Write the token length as a 4-byte integer
-                f.write(struct.pack("i", len(token_bytes)))
-                # Write the token data
-                f.write(token_bytes)
-                
-            print(f"\nExported {len(tokens)} tokens to {tokenizer_bin}")
-            print(f"Max token length: {max_token_length}")
+            # Step 2: Add learned tokens up to position 512
+            print("\nStep 2: Processing learned tokens...")
+            learned_tokens_added = 0
+            max_learned_tokens = VOCAB_SIZE - 256  # Should be 256
+
+            for i in range(256, self.n_words):
+                if learned_tokens_added >= max_learned_tokens:
+                    break
+
+                try:
+                    token_bytes = self.model.decode_single_token_bytes(i)
+                    if token_bytes:  # Only add non-empty tokens
+                        tokens.append(token_bytes)
+                        scores.append(float(i))
+                        learned_tokens_added += 1
+                except (KeyError, ValueError, Exception) as e:
+                    print(
+                        f"Warning: Skipping token {i} due to error: {str(e)}")
+                    continue
+
+            print(f"Added {learned_tokens_added} learned tokens")
+
+            # Step 3: Add padding tokens to reach exactly VOCAB_SIZE
+            padding_needed = VOCAB_SIZE - len(tokens)
+            if padding_needed > 0:
+                print(f"\nStep 3: Adding {padding_needed} padding tokens...")
+                for i in range(padding_needed):
+                    tokens.append(PAD_TOKEN)
+                    scores.append(0.0)
+
+            # Verify we have exactly VOCAB_SIZE tokens
+            if len(tokens) != VOCAB_SIZE:
+                raise ValueError(
+                    f"Invalid token count. Expected {VOCAB_SIZE}, got {len(tokens)}")
+
+            # Step 4: Calculate max token length and file size
+            max_token_length = max(len(t) for t in tokens)
+            header_size = 4  # max_token_length (int32)
+            token_metadata_size = 8  # score (float32) + length (int32)
+            expected_file_size = header_size + \
+                sum(len(t) + token_metadata_size for t in tokens)
+
+            print("\nToken Statistics:")
+            print(f"- Total tokens: {len(tokens)} (must be {VOCAB_SIZE})")
+            print(f"- Base tokens: 256")
+            print(f"- Learned tokens: {learned_tokens_added}")
+            print(f"- Padding tokens: {padding_needed}")
+            print(f"- Max token length: {max_token_length} bytes")
+
+            # Step 5: Create output file
+            tokenizer_bin = self.model_path.replace(".model", ".bin")
+            print(f"\nWriting binary file: {tokenizer_bin}")
+            print(f"Expected file size: {expected_file_size} bytes")
+
+            # Step 6: Write the binary file
+            with open(tokenizer_bin, "wb") as f:
+                # Write header
+                # Little-endian int32
+                f.write(struct.pack("<i", max_token_length))
+
+                # Write all 512 tokens
+                tokens_written = 0
+                for token_bytes, score in zip(tokens, scores):
+                    # Verify token is not None or empty
+                    if not token_bytes:
+                        token_bytes = PAD_TOKEN
+
+                    f.write(struct.pack("<f", score))  # Little-endian float32
+                    # Little-endian int32
+                    f.write(struct.pack("<i", len(token_bytes)))
+                    f.write(token_bytes)
+                    tokens_written += 1
+
+            # Step 7: Verify file
+            actual_size = os.path.getsize(tokenizer_bin)
+            print(f"\nVerification:")
+            print(f"- Tokens written: {tokens_written}")
+            print(f"- Expected size: {expected_file_size} bytes")
+            print(f"- Actual size: {actual_size} bytes")
+
+            if tokens_written != VOCAB_SIZE:
+                raise ValueError(
+                    f"Failed to write all tokens. Wrote {tokens_written}, expected {VOCAB_SIZE}")
+
+            if actual_size != expected_file_size:
+                raise ValueError(
+                    f"File size mismatch. Expected {expected_file_size}, got {actual_size}")
+
+            # Step 8: Verify file content
+            print("\nVerifying file content...")
+            with open(tokenizer_bin, "rb") as f:
+                # Verify header
+                stored_max_length = struct.unpack("<i", f.read(4))[0]
+                if stored_max_length != max_token_length:
+                    raise ValueError(
+                        f"Max token length mismatch. Expected {max_token_length}, got {stored_max_length}")
+
+                # Verify first few tokens
+                for i in range(min(5, VOCAB_SIZE)):
+                    score = struct.unpack("<f", f.read(4))[0]
+                    length = struct.unpack("<i", f.read(4))[0]
+                    token = f.read(length)
+                    if token != tokens[i]:
+                        raise ValueError(f"Token mismatch at position {i}")
+
+            print("\nExport completed successfully!")
+            print(f"Binary file created: {tokenizer_bin}")
+            print(f"File size: {actual_size} bytes")
+            return tokenizer_bin
+
+        except Exception as e:
+            print(f"\nError during export: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
 
     @staticmethod
     def train_vocab(corpus_dir: str, vocab_size: int, dtype: str = 'float32'):
         """Train a new vocabulary of the specified size on the given corpus directory"""
+    # Ensure vocab_size is exactly 512
+        if vocab_size != 512:
+            print(
+                f"WARNING: Adjusting vocab_size from {vocab_size} to 512 for C code compatibility")
+            vocab_size = 512
+
         print(f"\nStarting tokenizer training...")
         print(f"Vocabulary size: {vocab_size}")
         print(f"Data type: {dtype}")
