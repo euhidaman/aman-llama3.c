@@ -398,6 +398,8 @@ int compare_tokens(const void *a, const void *b)
 void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
 {
     t->vocab_size = vocab_size;
+    printf("Initializing tokenizer with vocab_size: %d\n", vocab_size); // Debug print
+
     t->vocab = (char **)malloc(vocab_size * sizeof(char *));
     t->vocab_scores = (float *)malloc(vocab_size * sizeof(float));
     t->sorted_vocab = NULL;
@@ -417,6 +419,26 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
     }
     printf("Tokenizer file opened successfully.\n");
 
+    // Get file size for verification
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    printf("Tokenizer file size: %ld bytes\n", file_size);
+
+    // Expected minimum file size calculation
+    long expected_min_size = sizeof(int) +                  // max_token_length
+                             (vocab_size * sizeof(float)) + // vocab_scores
+                             vocab_size;                    // minimum 1 byte per token string
+    printf("Expected minimum file size: %ld bytes\n", expected_min_size);
+
+    if (file_size < expected_min_size)
+    {
+        fprintf(stderr, "Error: Tokenizer file is too small. Expected at least %ld bytes, got %ld bytes\n",
+                expected_min_size, file_size);
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
     // Read max_token_length
     if (fread(&t->max_token_length, sizeof(int), 1, file) != 1)
     {
@@ -426,22 +448,46 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
     }
     printf("Max token length: %d\n", t->max_token_length);
 
-    // Read vocabulary scores and tokens
+    // Read vocabulary scores and tokens with additional checks
     int len;
+    long current_pos;
     for (int i = 0; i < vocab_size; i++)
     {
+        current_pos = ftell(file);
+        if (current_pos >= file_size)
+        {
+            fprintf(stderr, "Unexpected end of file at position %ld while reading token %d\n",
+                    current_pos, i);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
+
         if (fread(&t->vocab_scores[i], sizeof(float), 1, file) != 1)
         {
-            fprintf(stderr, "Failed to read vocab_scores[%d] from tokenizer file.\n", i);
+            fprintf(stderr, "Failed to read vocab_scores[%d] from tokenizer file at position %ld\n",
+                    i, current_pos);
             fclose(file);
             exit(EXIT_FAILURE);
         }
+
+        current_pos = ftell(file);
         if (fread(&len, sizeof(int), 1, file) != 1)
         {
-            fprintf(stderr, "Failed to read token length for vocab[%d] from tokenizer file.\n", i);
+            fprintf(stderr, "Failed to read token length for vocab[%d] from tokenizer file at position %ld\n",
+                    i, current_pos);
             fclose(file);
             exit(EXIT_FAILURE);
         }
+
+        // Sanity check for token length
+        if (len <= 0 || len > t->max_token_length)
+        {
+            fprintf(stderr, "Invalid token length %d for vocab[%d]. Must be between 1 and %d\n",
+                    len, i, t->max_token_length);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
+
         t->vocab[i] = (char *)malloc(len + 1);
         if (!t->vocab[i])
         {
@@ -449,9 +495,12 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size)
             fclose(file);
             exit(EXIT_FAILURE);
         }
+
+        current_pos = ftell(file);
         if (fread(t->vocab[i], len, 1, file) != 1)
         {
-            fprintf(stderr, "Failed to read token string for vocab[%d] from tokenizer file.\n", i);
+            fprintf(stderr, "Failed to read token string for vocab[%d] at position %ld\n",
+                    i, current_pos);
             fclose(file);
             exit(EXIT_FAILURE);
         }
@@ -679,6 +728,42 @@ void error_usage()
     exit(EXIT_FAILURE);
 }
 
+void encode(Tokenizer *t, const char *text, int bos, int eos, int *tokens, int *n_tokens)
+{
+    // Start with BOS (beginning of sequence) token if requested
+    *n_tokens = 0;
+    if (bos)
+    {
+        tokens[(*n_tokens)++] = 1;
+    }
+
+    // Simple space-based tokenization for demonstration
+    char *text_copy = strdup(text);
+    char *token = strtok(text_copy, " ");
+
+    while (token != NULL && *n_tokens < t->max_token_length)
+    {
+        // Find the token in vocabulary
+        for (int i = 0; i < t->vocab_size; i++)
+        {
+            if (strcmp(t->vocab[i], token) == 0)
+            {
+                tokens[(*n_tokens)++] = i;
+                break;
+            }
+        }
+        token = strtok(NULL, " ");
+    }
+
+    // Add EOS (end of sequence) token if requested
+    if (eos)
+    {
+        tokens[(*n_tokens)++] = 2;
+    }
+
+    free(text_copy);
+}
+
 int main(int argc, char *argv[])
 {
     char *checkpoint_path = NULL;
@@ -786,8 +871,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    // TODO: Implement the encode function for your tokenizer
-    // encode(&tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+    encode(&tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
 
     if (num_prompt_tokens < 1)
     {
