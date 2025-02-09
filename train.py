@@ -17,6 +17,7 @@ from pathlib import Path
 import psutil
 from tqdm import tqdm
 import warnings
+import struct
 from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
@@ -171,6 +172,111 @@ def get_batch(data, split, batch_size, max_seq_len, device, dtype=None):
                     for i in ix])
 
     return x.to(device).long(), y.to(device).long()
+
+
+def serialize_fp32(file, tensor):
+    """Writes tensor to file in fp32 format"""
+    d = tensor.detach().cpu().view(-1).to(torch.float32).numpy()
+    b = struct.pack(f'{len(d)}f', *d)
+    file.write(b)
+
+
+def export_model_to_c(model, filepath, version=1):
+    """Export model to C-compatible binary format"""
+    out_file = open(filepath, 'wb')
+
+    if version == 0:
+        # Legacy format
+        hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+        p = model.params
+        shared_classifier = torch.equal(
+            model.tok_embeddings.weight, model.output.weight)
+        vocab_size = p.vocab_size if shared_classifier else -p.vocab_size
+        n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+
+        # Write header
+        header = struct.pack('iiiiiii',
+                             p.dim, hidden_dim, p.n_layers, p.n_heads,
+                             n_kv_heads, vocab_size, p.max_seq_len)
+        out_file.write(header)
+
+        # Write weights in correct order
+        serialize_fp32(out_file, model.tok_embeddings.weight)
+
+        # Write attention layers grouped by type
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention_norm.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wq.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wk.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wv.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wo.weight)
+
+        # Write FFN weights
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.ffn_norm.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w1.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w2.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w3.weight)
+
+        # Write final norm
+        serialize_fp32(out_file, model.norm.weight)
+
+        # Write classifier if not shared
+        if not shared_classifier:
+            serialize_fp32(out_file, model.output.weight)
+
+    else:
+        # Version 1 format with proper header
+        out_file.write(struct.pack('I', 0x616b3432))  # Magic "ak42"
+        out_file.write(struct.pack('i', version))     # Version number
+
+        p = model.params
+        hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+        n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+
+        # Write params
+        header = struct.pack('iiiiiii',
+                             p.dim, hidden_dim, p.n_layers, p.n_heads,
+                             n_kv_heads, p.vocab_size, p.max_seq_len)
+        out_file.write(header)
+
+        # Write flags
+        shared_classifier = torch.equal(
+            model.tok_embeddings.weight, model.output.weight)
+        out_file.write(struct.pack('B', int(shared_classifier)))
+
+        # Pad to 256 bytes
+        pad = 256 - out_file.tell()
+        out_file.write(b'\0' * pad)
+
+        # Write weights in new order
+        weights = [
+            *[layer.attention_norm.weight for layer in model.layers],
+            *[layer.ffn_norm.weight for layer in model.layers],
+            model.norm.weight,
+            model.tok_embeddings.weight,
+            *[layer.attention.wq.weight for layer in model.layers],
+            *[layer.attention.wk.weight for layer in model.layers],
+            *[layer.attention.wv.weight for layer in model.layers],
+            *[layer.attention.wo.weight for layer in model.layers],
+            *[layer.feed_forward.w1.weight for layer in model.layers],
+            *[layer.feed_forward.w2.weight for layer in model.layers],
+            *[layer.feed_forward.w3.weight for layer in model.layers],
+        ]
+        if not shared_classifier:
+            weights.append(model.output.weight)
+
+        for w in weights:
+            serialize_fp32(out_file, w)
+
+    out_file.close()
 
 
 @torch.no_grad()
@@ -423,7 +529,8 @@ def main():
 
         # Export model to binary format for C inference
         binary_path = save_dir / 'model.bin'
-        model.export_to_c(save_dir)  # This will create model.bin
+        # Use version 1 format
+        export_model_to_c(model, binary_path, version=1)
 
         print(f"\nTraining completed!")
         print(f"Models saved to:")

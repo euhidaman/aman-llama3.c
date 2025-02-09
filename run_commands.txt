@@ -2,11 +2,11 @@ pip install -r requirements.txt
 
 python prepare_data.py download
 
-python tokenizer.py train_vocab --vocab_size=512 --dtype=float16
+python tokenizer.py train_vocab --vocab_size=512 --dtype=float32
 
-python check_tokenization.py --dtype=float16
+python check_tokenization.py --dtype=float32
 
-python tokenizer.py pretokenize --vocab_size=512 --dtype=float16
+python tokenizer.py pretokenize --vocab_size=512 --dtype=float32
 
 python train.py --dtype=float16 --test_run --lr=1e-4
 

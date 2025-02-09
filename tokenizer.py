@@ -108,95 +108,42 @@ class Tokenizer:
 
     def export(self):
         """
-        Export the tokenizer in a binary format compatible with the C code.
-        The binary format structure is:
-        - 4 bytes: max_token_length (int32)
-        - For each token (exactly 512 tokens):
-            - 4 bytes: score (float32)
-            - 4 bytes: token_length (int32)
-            - n bytes: token_data (where n is token_length)
+        Export the tokenizer in legacy llama2.c binary format.
         """
         try:
             # Fixed vocabulary size for C code compatibility
             VOCAB_SIZE = 512
-            PAD_TOKEN = bytes([0])  # Use null byte for padding
-
-            # Calculate max token length from actual vocabulary
-            max_token_length = 0
-            print("\nCalculating maximum token length...")
-            for token in self.vocab.keys():
-                max_token_length = max(max_token_length, len(token))
-            print(f"Max token length: {max_token_length} bytes")
-
-            # Initialize arrays for tokens and scores
-            tokens = []
-            scores = []
-
-            print("\nStep 1: Processing base tokens (0-255)...")
-            # Add base byte tokens (0-255)
-            for i in range(256):
-                token = bytes([i])
-                tokens.append(token)
-                scores.append(float(i))
-            print(f"Added {len(tokens)} base tokens")
-
-            print("\nStep 2: Processing learned tokens...")
-            # Add learned tokens from vocabulary
-            learned_tokens = sorted(
-                [(token, score) for token, score in self.vocab_scores.items()],
-                key=lambda x: x[1]  # Sort by score
-            )[:VOCAB_SIZE-256]  # Take only what we need
-
-            for token, score in learned_tokens:
-                if len(tokens) >= VOCAB_SIZE:
-                    break
-                tokens.append(token.encode('utf-8'))
-                scores.append(score)
-
-            # Pad to exactly VOCAB_SIZE tokens if needed
-            while len(tokens) < VOCAB_SIZE:
-                tokens.append(PAD_TOKEN)
-                scores.append(0.0)
-
-            print(
-                f"Total tokens: {len(tokens)} (should be exactly {VOCAB_SIZE})")
 
             # Create binary file
             tokenizer_bin = self.model_path.replace(".model", ".bin")
             print(f"\nWriting binary file: {tokenizer_bin}")
 
             with open(tokenizer_bin, "wb") as f:
-                # Write header
-                # Little-endian int32
-                f.write(struct.pack("<i", max_token_length))
+                # Write vocab size as header
+                f.write(struct.pack('i', VOCAB_SIZE))
 
-                # Write tokens
-                for token, score in zip(tokens, scores):
-                    f.write(struct.pack("<f", score))  # Little-endian float32
-                    # Little-endian int32
-                    f.write(struct.pack("<i", len(token)))
-                    f.write(token)  # Raw bytes
+                # Get sorted vocabulary
+                vocab = {
+                    rank: token for token, rank in self.model.mergeable_ranks.items()
+                }
 
-            # Verify the file
-            file_size = os.path.getsize(tokenizer_bin)
+                # Write tokens in order
+                for i in range(VOCAB_SIZE):
+                    # Use null byte for missing tokens
+                    token = vocab.get(i, bytes([0]))
+                    score = float(i)  # Use rank as score
+
+                    # Write score (float32)
+                    f.write(struct.pack('f', score))
+                    # Write length (int32)
+                    f.write(struct.pack('i', len(token)))
+                    # Write token data
+                    f.write(token)
+
+            # Print verification info
             print(f"\nVerification:")
             print(f"- File created: {tokenizer_bin}")
-            print(f"- File size: {file_size} bytes")
-
-            # Read back first few tokens to verify format
-            print("\nVerifying file format...")
-            with open(tokenizer_bin, "rb") as f:
-                max_len = struct.unpack("<i", f.read(4))[0]
-                print(f"- Read max_token_length: {max_len}")
-
-                # Verify first 5 tokens
-                for i in range(5):
-                    score = struct.unpack("<f", f.read(4))[0]
-                    length = struct.unpack("<i", f.read(4))[0]
-                    token = f.read(length)
-                    print(
-                        f"- Token {i}: score={score}, length={length}, data={token}")
-
+            print(f"- File size: {os.path.getsize(tokenizer_bin)} bytes")
             return tokenizer_bin
 
         except Exception as e:
