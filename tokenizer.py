@@ -107,9 +107,7 @@ class Tokenizer:
         return self.model.decode(t)
 
     def export(self):
-        """
-        Export the tokenizer in legacy llama2.c binary format.
-        """
+        """Export the tokenizer in format compatible with C code"""
         try:
             # Fixed vocabulary size for C code compatibility
             VOCAB_SIZE = 512
@@ -119,28 +117,29 @@ class Tokenizer:
             print(f"\nWriting binary file: {tokenizer_bin}")
 
             with open(tokenizer_bin, "wb") as f:
-                # Write vocab size as header
-                f.write(struct.pack('i', VOCAB_SIZE))
+                # Write max token length as header
+                max_token_length = max(len(token)
+                                       for token in self.model._mergeable_ranks.keys())
+                f.write(struct.pack('i', max_token_length))
 
-                # Get sorted vocabulary - use _mergeable_ranks instead of mergeable_ranks
+                # Get sorted vocabulary
                 vocab = {
                     rank: token for token, rank in self.model._mergeable_ranks.items()
                 }
 
                 # Write tokens in order
                 for i in range(VOCAB_SIZE):
-                    # Use null byte for missing tokens
-                    token = vocab.get(i, bytes([0]))
-                    score = float(i)  # Use rank as score
+                    token = vocab.get(i, b'')
+                    if isinstance(token, str):
+                        token = token.encode('utf-8')
 
-                    # Write score (float32)
-                    f.write(struct.pack('f', score))
-                    # Write length (int32)
+                    # Write score (rank as float)
+                    f.write(struct.pack('f', float(i)))
+                    # Write length
                     f.write(struct.pack('i', len(token)))
                     # Write token data
                     f.write(token)
 
-            # Print verification info
             print(f"\nVerification:")
             print(f"- File created: {tokenizer_bin}")
             print(f"- File size: {os.path.getsize(tokenizer_bin)} bytes")
@@ -148,8 +147,6 @@ class Tokenizer:
 
         except Exception as e:
             print(f"\nError during export: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
             raise
 
     @staticmethod

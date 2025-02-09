@@ -494,8 +494,8 @@ class Llama3(nn.Module):
 
         return model
 
-    def export_to_c(self, save_directory: str):
-        """Export model weights to binary format for C inference"""
+    def export_model_to_c(self, save_directory: str):
+        # Replace your current export method with this in your model.py Llama3 class
         import struct
         import numpy as np
         from pathlib import Path
@@ -503,73 +503,65 @@ class Llama3(nn.Module):
         save_directory = Path(save_directory)
         bin_path = save_directory / "model.bin"
 
-        # Define config that matches C struct exactly
-        config = {
-            'dim': self.params.dim,                    # 128
-            'n_layers': self.params.n_layers,          # 12
-            'n_heads': self.params.n_heads,            # 4
-            # 4 (same as n_heads if not specified)
-            'n_kv_heads': self.params.n_heads,
-            'vocab_size': 512,                         # must be exactly 512
-            'seq_len': self.params.max_seq_len,        # 512
-            'norm_eps': self.params.norm_eps,          # 1e-5
-            # 512 (4x the model dimension)
-            'hidden_dim': self.params.dim * 4,
-            'multiple_of': self.params.multiple_of,    # 256
-            'rope_theta': self.params.rope_theta,      # 10000.0
-        }
-
-        print(f"\nExporting model to {bin_path}")
-        print("\nConfiguration being exported:")
-        for k, v in config.items():
-            print(f"- {k}: {v}")
-
         with open(bin_path, 'wb') as f:
-            # Write config struct - must match C exactly
-            f.write(struct.pack('i', config['dim']))
-            f.write(struct.pack('i', config['n_layers']))
-            f.write(struct.pack('i', config['n_heads']))
-            f.write(struct.pack('i', config['n_kv_heads']))
-            f.write(struct.pack('i', config['vocab_size']))
-            f.write(struct.pack('i', config['seq_len']))
-            f.write(struct.pack('f', config['norm_eps']))
-            f.write(struct.pack('i', config['hidden_dim']))
-            f.write(struct.pack('i', config['multiple_of']))
-            f.write(struct.pack('f', config['rope_theta']))
+            # 1. Write Config struct - EXACTLY matching your run.c Config struct
+            p = self.params
+            # Write in same order as run.c Config struct
+            f.write(struct.pack('i', p.dim))
+            f.write(struct.pack('i', p.n_layers))
+            f.write(struct.pack('i', p.n_heads))
+            f.write(struct.pack(
+                'i', p.n_heads if p.n_kv_heads is None else p.n_kv_heads))
+            f.write(struct.pack('i', 512))  # Must be exactly 512
+            f.write(struct.pack('i', p.max_seq_len))
+            f.write(struct.pack('f', p.norm_eps))
+            f.write(struct.pack('i', p.dim * 4))  # hidden_dim = dim * 4
+            f.write(struct.pack('i', p.multiple_of))
+            f.write(struct.pack('f', p.rope_theta))
 
             # Get state dict
             state_dict = self.state_dict()
 
-            # Write weights in the order expected by the C code
             def write_tensor(tensor):
                 tensor = tensor.cpu().detach().numpy().astype(np.float32)
                 tensor.tofile(f)
 
-            # Token embeddings
+            # 2. Write weights in EXACT order matching memory_map_weights in run.c
             write_tensor(state_dict['tok_embeddings.weight'])
 
-            # Layers
-            for layer_id in range(config['n_layers']):
-                prefix = f'layers.{layer_id}.'
+            # Write all attention norms first
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.attention_norm.weight'])
 
-                # Attention weights
-                write_tensor(state_dict[prefix + 'attention_norm.weight'])
-                write_tensor(state_dict[prefix + 'attention.wq.weight'])
-                write_tensor(state_dict[prefix + 'attention.wk.weight'])
-                write_tensor(state_dict[prefix + 'attention.wv.weight'])
-                write_tensor(state_dict[prefix + 'attention.wo.weight'])
+            # Then all attention weights grouped by type
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.attention.wq.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.attention.wk.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.attention.wv.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.attention.wo.weight'])
 
-                # FFN weights
-                write_tensor(state_dict[prefix + 'ffn_norm.weight'])
-                write_tensor(state_dict[prefix + 'feed_forward.w1.weight'])
-                write_tensor(state_dict[prefix + 'feed_forward.w2.weight'])
-                write_tensor(state_dict[prefix + 'feed_forward.w3.weight'])
+            # Then all ffn weights grouped by type
+            for layer_id in range(p.n_layers):
+                write_tensor(state_dict[f'layers.{layer_id}.ffn_norm.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.feed_forward.w1.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.feed_forward.w2.weight'])
+            for layer_id in range(p.n_layers):
+                write_tensor(
+                    state_dict[f'layers.{layer_id}.feed_forward.w3.weight'])
 
-            # Final norm
             write_tensor(state_dict['norm.weight'])
-
-        print(f"\nModel exported successfully to {bin_path}")
-        print(f"File size: {bin_path.stat().st_size / 1024 / 1024:.2f} MB")
 
     def get_model_size(self):
         """Calculate and return model size in millions of parameters"""

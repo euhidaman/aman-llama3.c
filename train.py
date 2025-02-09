@@ -20,6 +20,7 @@ import warnings
 import struct
 from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
+from validate import validate_model_binary, validate_tokenizer_binary, validate_exports
 
 # Suppress complex values warning
 warnings.filterwarnings(
@@ -532,11 +533,21 @@ def main():
         # Use version 1 format
         export_model_to_c(model, binary_path, version=1)
 
-        print(f"\nTraining completed!")
-        print(f"Models saved to:")
-        print(f"- PyTorch format: {final_path}")
-        print(f"- C binary format: {binary_path}")
-        print(f"Best validation loss: {best_val_loss:.4f}")
+        # Get tokenizer binary path
+        tokenizer_bin = Path(model.tokenizer.model_path).with_suffix('.bin')
+
+        print("\nValidating exported binaries...")
+        validation_success = validate_exports(binary_path, tokenizer_bin)
+
+        if validation_success:
+            print(f"\nTraining completed!")
+            print(f"Models saved and validated:")
+            print(f"- PyTorch format: {final_path}")
+            print(f"- C binary format: {binary_path}")
+            print(f"- Tokenizer binary: {tokenizer_bin}")
+            print(f"Best validation loss: {best_val_loss:.4f}")
+        else:
+            print("\nWarning: Binary validation failed! Please check the exported files.")
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
