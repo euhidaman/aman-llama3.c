@@ -122,9 +122,9 @@ class Tokenizer:
                 # Write vocab size as header
                 f.write(struct.pack('i', VOCAB_SIZE))
 
-                # Get sorted vocabulary
+                # Get sorted vocabulary - use _mergeable_ranks instead of mergeable_ranks
                 vocab = {
-                    rank: token for token, rank in self.model.mergeable_ranks.items()
+                    rank: token for token, rank in self.model._mergeable_ranks.items()
                 }
 
                 # Write tokens in order
