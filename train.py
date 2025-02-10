@@ -20,7 +20,6 @@ import warnings
 import struct
 from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
-from validate import validate_model_binary, validate_tokenizer_binary, validate_exports
 
 # Suppress complex values warning
 warnings.filterwarnings(
@@ -333,6 +332,72 @@ def save_checkpoint(model, optimizer, scheduler, iteration, loss, save_dir):
     print(f"\nSaved checkpoint to {checkpoint_path}")
 
 
+def validate_model_binary(filepath):
+    """Validate that the model binary file matches C code expectations"""
+    try:
+        with open(filepath, 'rb') as f:
+            # 1. Read and validate Config struct
+            config = {
+                'dim': struct.unpack('i', f.read(4))[0],
+                'n_layers': struct.unpack('i', f.read(4))[0],
+                'n_heads': struct.unpack('i', f.read(4))[0],
+                'n_kv_heads': struct.unpack('i', f.read(4))[0],
+                'vocab_size': struct.unpack('i', f.read(4))[0],
+                'seq_len': struct.unpack('i', f.read(4))[0],
+                'norm_eps': struct.unpack('f', f.read(4))[0],
+                'hidden_dim': struct.unpack('i', f.read(4))[0],
+                'multiple_of': struct.unpack('i', f.read(4))[0],
+                'rope_theta': struct.unpack('f', f.read(4))[0]
+            }
+
+            print("\nModel Configuration:")
+            for k, v in config.items():
+                print(f"{k}: {v}")
+
+            # Validate parameters
+            assert config['vocab_size'] == 512, f"vocab_size must be 512, got {config['vocab_size']}"
+            assert 0 < config['dim'] <= 8192, f"Invalid dimension {config['dim']}"
+            assert 0 < config['n_layers'] <= 100, f"Invalid n_layers {config['n_layers']}"
+            assert 0 < config['n_heads'] <= 64, f"Invalid n_heads {config['n_heads']}"
+            assert config['n_kv_heads'] <= config[
+                'n_heads'], f"n_kv_heads {config['n_kv_heads']} > n_heads {config['n_heads']}"
+
+            # Calculate expected file size
+            expected_size = (
+                10 * 4 +  # Config struct (10 fields * 4 bytes each)
+                config['vocab_size'] * config['dim'] * 4 +  # token embeddings
+                config['n_layers'] * (
+                    config['dim'] * 4 +  # attention norm
+                    config['dim'] * config['dim'] * 4 +  # wq
+                    config['dim'] * config['dim'] * 4 +  # wk
+                    config['dim'] * config['dim'] * 4 +  # wv
+                    config['dim'] * config['dim'] * 4 +  # wo
+                    config['dim'] * 4 +  # ffn norm
+                    config['dim'] * config['hidden_dim'] * 4 +  # w1
+                    config['hidden_dim'] * config['dim'] * 4 +  # w2
+                    config['dim'] * config['hidden_dim'] * 4  # w3
+                ) +
+                config['dim'] * 4  # final norm
+            )
+
+            # Check file size
+            f.seek(0, 2)  # Go to end of file
+            actual_size = f.tell()
+
+            print(f"\nFile size validation:")
+            print(f"Expected: {expected_size:,} bytes")
+            print(f"Actual: {actual_size:,} bytes")
+
+            assert actual_size == expected_size, f"File size mismatch! Expected {expected_size:,} bytes but got {actual_size:,} bytes"
+
+            print("\nModel binary validation successful! ✓")
+            return True
+
+    except Exception as e:
+        print(f"\nError validating model binary: {str(e)}")
+        return False
+
+
 def save_config(save_dir, params, args):
     """Save configuration with proper dtype handling"""
     config_path = save_dir / 'config.json'
@@ -533,18 +598,14 @@ def main():
         # Use version 1 format
         export_model_to_c(model, binary_path, version=1)
 
-        # Get tokenizer binary path
-        tokenizer_bin = Path(model.tokenizer.model_path).with_suffix('.bin')
-
         print("\nValidating exported binaries...")
-        validation_success = validate_exports(binary_path, tokenizer_bin)
+        validation_success = validate_model_binary(binary_path)
 
         if validation_success:
             print(f"\nTraining completed!")
             print(f"Models saved and validated:")
             print(f"- PyTorch format: {final_path}")
             print(f"- C binary format: {binary_path}")
-            print(f"- Tokenizer binary: {tokenizer_bin}")
             print(f"Best validation loss: {best_val_loss:.4f}")
         else:
             print("\nWarning: Binary validation failed! Please check the exported files.")

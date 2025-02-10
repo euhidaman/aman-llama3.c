@@ -13,7 +13,6 @@ from typing import List
 from tqdm import tqdm
 from functools import partial
 from concurrent.futures import ProcessPoolExecutor
-
 import tiktoken
 import regex
 from tiktoken.load import load_tiktoken_bpe
@@ -106,6 +105,53 @@ class Tokenizer:
             t = t[:-1]
         return self.model.decode(t)
 
+    def validate_tokenizer_binary(self, filepath):
+        """Validate that the tokenizer binary file matches C code expectations"""
+        try:
+            with open(filepath, 'rb') as f:
+                # Read max token length
+                max_token_length = struct.unpack('i', f.read(4))[0]
+                print(f"\nTokenizer Configuration:")
+                print(f"Max token length: {max_token_length}")
+
+                # Read and validate all 512 tokens
+                token_count = 0
+                max_actual_length = 0
+
+                while True:
+                    try:
+                        # Read score and length
+                        score = struct.unpack('f', f.read(4))[0]
+                        length = struct.unpack('i', f.read(4))[0]
+
+                        # Read token data
+                        token_data = f.read(length)
+                        max_actual_length = max(max_actual_length, length)
+
+                        token_count += 1
+                        if token_count > 512:
+                            raise ValueError(
+                                "Too many tokens in file (should be exactly 512)")
+
+                    except struct.error:
+                        break
+
+                # Validate token count
+                assert token_count == 512, f"Expected 512 tokens, found {token_count}"
+
+                # Validate max token length
+                assert max_actual_length <= max_token_length, \
+                    f"Actual max token length {max_actual_length} exceeds header value {max_token_length}"
+
+                print(f"Total tokens: {token_count}")
+                print(f"Maximum token length in file: {max_actual_length}")
+                print("\nTokenizer binary validation successful! ✓")
+                return True
+
+        except Exception as e:
+            print(f"\nError validating tokenizer binary: {str(e)}")
+            return False
+
     def export(self):
         """Export the tokenizer in format compatible with C code"""
         try:
@@ -143,11 +189,21 @@ class Tokenizer:
             print(f"\nVerification:")
             print(f"- File created: {tokenizer_bin}")
             print(f"- File size: {os.path.getsize(tokenizer_bin)} bytes")
+
+            # Add validation after export
+            if self.validate_tokenizer_binary(tokenizer_bin):
+                print("Model binary validated successfully!")
+            else:
+                raise ValueError("Model binary validation failed!")
             return tokenizer_bin
 
         except Exception as e:
             print(f"\nError during export: {str(e)}")
             raise
+
+        except Exception as e:
+            print(f"\nError validating tokenizer binary: {str(e)}")
+            return False
 
     @staticmethod
     def train_vocab(corpus_dir: str, vocab_size: int, dtype: str = 'float32'):
