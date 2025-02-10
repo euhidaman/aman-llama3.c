@@ -7,6 +7,7 @@ from torch import nn
 import argparse
 from dataclasses import dataclass
 from typing import Optional
+import os
 
 
 def get_dtype_from_args():
@@ -34,49 +35,106 @@ def get_torch_dtype(dtype_str: str) -> torch.dtype:
     return dtype_map[dtype_str]
 
 
+def validate_tokenizer_config(tokenizer_path: str) -> bool:
+    """Validate that tokenizer has exactly 512 tokens"""
+    try:
+        tokenizer = Tokenizer(tokenizer_path)
+        if tokenizer.n_words != 512:
+            raise ValueError(
+                f"Tokenizer must have exactly 512 tokens, found {tokenizer.n_words}")
+        return True
+    except Exception as e:
+        print(f"Error validating tokenizer: {str(e)}")
+        return False
+
+
 # Get dtype from command line args
 dtype_str = get_dtype_from_args()
 print(f"Using dtype: {dtype_str}")
 
-# import the tokenizer we have created
-
 # Initialize the tokenizer with dtype-specific model
 tokenizer_model = f"tokenizer_512_{dtype_str}.model"
-try:
-    print(f"Loading tokenizer model: {tokenizer_model}")
-    tokenizer = Tokenizer(tokenizer_model)
-except FileNotFoundError:
-    print(f"\nError: Tokenizer model '{tokenizer_model}' not found!")
-    print(f"Please run first:")
+tokenizer_bin = tokenizer_model.replace('.model', '.bin')
+
+# Check if both model and binary files exist
+if not os.path.exists(tokenizer_model) or not os.path.exists(tokenizer_bin):
+    print(f"\nError: Tokenizer files not found!")
+    print(f"Missing files:")
+    if not os.path.exists(tokenizer_model):
+        print(f"- {tokenizer_model}")
+    if not os.path.exists(tokenizer_bin):
+        print(f"- {tokenizer_bin}")
+    print("\nPlease run first:")
     print(
         f"python tokenizer.py train_vocab --vocab_size=512 --dtype={dtype_str}")
     print(
         f"python tokenizer.py pretokenize --vocab_size=512 --dtype={dtype_str}")
+    raise FileNotFoundError("Tokenizer files not found")
+
+# Load and validate tokenizer
+try:
+    print(f"Loading tokenizer model: {tokenizer_model}")
+    tokenizer = Tokenizer(tokenizer_model)
+    if not validate_tokenizer_config(tokenizer_model):
+        raise ValueError("Tokenizer validation failed")
+except Exception as e:
+    print(f"\nError: Failed to load or validate tokenizer!")
+    print(f"Error details: {str(e)}")
+    print("\nPlease ensure the tokenizer was properly trained with:")
+    print(
+        f"python tokenizer.py train_vocab --vocab_size=512 --dtype={dtype_str}")
     raise
 
 
 @dataclass
 class ModelArgs:
-    dim: int = 128  # 4096
-    n_layers: int = 12  # 32
-    n_heads: int = 4  # 32
-    n_kv_heads: Optional[int] = None  # Changed from 1 to None for consistency
-    vocab_size: int = None  # Will be set after tokenizer initialization
-    multiple_of: int = 256
+    # Model architecture
+    dim: int = 128  # transformer dimension
+    n_layers: int = 12  # number of layers
+    n_heads: int = 4  # number of attention heads
+    # number of key/value heads (defaults to n_heads)
+    n_kv_heads: Optional[int] = None
+    vocab_size: int = 512  # fixed vocabulary size for C compatibility
+    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    # optional multiply constant for FFN hidden dimension
     ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
-    max_batch_size: int = 24
-    max_seq_len: int = 512
+
+    # Model configuration
+    norm_eps: float = 1e-5  # Layer norm epsilon
+    rope_theta: float = 10000  # RoPE theta parameter
+    max_batch_size: int = 24  # maximum batch size for training
+    max_seq_len: int = 512  # maximum sequence length
+    dropout_rate: float = 0.1  # dropout rate
+
+    # Hardware configuration
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dropout_rate: float = 0.1
     dtype: torch.dtype = get_torch_dtype(dtype_str)
 
     def __post_init__(self):
-        if self.vocab_size is None:
-            self.vocab_size = tokenizer.n_words
+        """Validate and set derived parameters"""
+        # Ensure vocab_size is exactly 512
+        if self.vocab_size != 512:
+            raise ValueError(
+                f"vocab_size must be exactly 512, got {self.vocab_size}")
+
+        # Set n_kv_heads to n_heads if not specified
         if self.n_kv_heads is None:
             self.n_kv_heads = self.n_heads
+
+        # Validate n_kv_heads
+        if self.n_kv_heads > self.n_heads:
+            raise ValueError(
+                f"n_kv_heads ({self.n_kv_heads}) cannot be larger than n_heads ({self.n_heads})")
+
+        # Validate dimensions
+        if self.dim % self.n_heads != 0:
+            raise ValueError(
+                f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
+
+        # Validate multiple_of
+        if self.dim % self.multiple_of != 0:
+            raise ValueError(
+                f"dim ({self.dim}) must be divisible by multiple_of ({self.multiple_of})")
 
 
 # Create an instance of ModelArgs

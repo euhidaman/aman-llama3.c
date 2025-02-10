@@ -208,7 +208,7 @@ class Tokenizer:
     @staticmethod
     def train_vocab(corpus_dir: str, vocab_size: int, dtype: str = 'float32'):
         """Train a new vocabulary of the specified size on the given corpus directory"""
-    # Ensure vocab_size is exactly 512
+        # Force vocab_size to be exactly 512 for C code compatibility
         if vocab_size != 512:
             print(
                 f"WARNING: Adjusting vocab_size from {vocab_size} to 512 for C code compatibility")
@@ -242,8 +242,9 @@ class Tokenizer:
         byte_text = "\n".join(all_text).encode("utf-8")
         print(f"Total size of text: {len(byte_text)/1024/1024:.2f} MB")
 
-        # Create base vocabulary (byte-level)
+        # Create base vocabulary (byte-level) - Always reserve first 256 tokens
         base_vocab = {bytes([i]): i for i in range(256)}
+        available_vocab_slots = vocab_size - 256  # Should be 256 slots remaining
 
         # Tokenize the text using regex pattern
         pattern = regex.compile(Tokenizer.pat_str)
@@ -272,24 +273,44 @@ class Tokenizer:
         sorted_tokens = sorted(token_freqs.items(),
                                key=lambda x: x[1], reverse=True)
 
-        # Take top vocab_size tokens
+        # Create final vocabulary with exactly vocab_size tokens
         print(f"\nStep 4/4: Creating final vocabulary of size {vocab_size}...")
-        final_vocab = {token: i + 256 for i,
-                       (token, freq) in enumerate(sorted_tokens[:vocab_size-256])}
+        final_vocab = {}
+
+        # First add base vocabulary (0-255)
         final_vocab.update(base_vocab)
+
+        # Then add the most frequent tokens up to available_vocab_slots
+        added_tokens = 0
+        for token, freq in sorted_tokens:
+            if added_tokens >= available_vocab_slots:
+                break
+            if token not in final_vocab:  # Ensure no overlap with base vocab
+                final_vocab[token] = 256 + added_tokens
+                added_tokens += 1
+
+        # If we still haven't reached vocab_size, add padding tokens
+        while len(final_vocab) < vocab_size:
+            pad_token = f"[PAD{len(final_vocab)-256}]".encode("utf-8")
+            final_vocab[pad_token] = len(final_vocab)
+
+        # Verify we have exactly vocab_size tokens
+        assert len(
+            final_vocab) == vocab_size, f"Vocabulary size mismatch: got {len(final_vocab)}, expected {vocab_size}"
 
         # Save the vocabulary with dtype in filename
         model_path = f"tokenizer_{vocab_size}_{dtype}.model"
         print(f"\nSaving vocabulary to {model_path}...")
         with open(model_path, "w", encoding="utf-8") as f:
-            for token, rank in tqdm(final_vocab.items(), desc="Writing vocabulary"):
+            for token, rank in tqdm(sorted(final_vocab.items(), key=lambda x: x[1]), desc="Writing vocabulary"):
                 token_b64 = base64.b64encode(token).decode('utf-8')
                 f.write(f"{token_b64} {rank}\n")
 
         print(f"\nTraining completed!")
         print(f"Vocabulary size: {len(final_vocab):,} tokens")
-        print(f"Most common token appears {sorted_tokens[0][1]:,} times")
-        print(f"Least common token appears {sorted_tokens[-1][1]:,} times")
+        if sorted_tokens:  # Only print if we have tokens
+            print(f"Most common token appears {sorted_tokens[0][1]:,} times")
+            print(f"Least common token appears {sorted_tokens[-1][1]:,} times")
         print(f"Model saved to: {model_path}")
 
         # Create and export the binary version
@@ -297,6 +318,8 @@ class Tokenizer:
         tokenizer = Tokenizer(model_path)
         tokenizer.export()
         print(f"Binary model saved to: {model_path.replace('.model', '.bin')}")
+
+        return model_path
 
 
 def process_shard(args):
