@@ -40,8 +40,10 @@ def validate_tokenizer_config(tokenizer_path: str) -> bool:
     try:
         tokenizer = Tokenizer(tokenizer_path)
         if tokenizer.n_words != 512:
-            raise ValueError(
-                f"Tokenizer must have exactly 512 tokens, found {tokenizer.n_words}")
+            print(f"\nError: Invalid vocabulary size")
+            print(f"Expected: 512 tokens")
+            print(f"Found: {tokenizer.n_words} tokens")
+            return False
         return True
     except Exception as e:
         print(f"Error validating tokenizer: {str(e)}")
@@ -88,46 +90,38 @@ except Exception as e:
 
 @dataclass
 class ModelArgs:
-    dim: int = 256                # Changed from 128 to 256 to be divisible by multiple_of
-    n_layers: int = 12
-    n_heads: int = 4
+    dim: int = 256                # Model dimension
+    n_layers: int = 12           # Number of layers
+    n_heads: int = 4             # Number of attention heads
     n_kv_heads: Optional[int] = None
-    vocab_size: int = 512         # Fixed for our tokenizer
-    multiple_of: int = 256        # This is our constraint
+    vocab_size: int = 512        # Must be exactly 512
+    multiple_of: int = 256       # Dimension must be divisible by this
     ffn_dim_multiplier: Optional[float] = None
+    max_seq_len: int = 512
+    max_batch_size: int = 24
     norm_eps: float = 1e-5
     rope_theta: float = 10000
-    max_batch_size: int = 24
-    max_seq_len: int = 512
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dropout_rate: float = 0.1
     dtype: torch.dtype = torch.float32
 
     def __post_init__(self):
-        """Validate and set derived parameters"""
-        # Ensure vocab_size is exactly 512
+        # Strict validation for vocab_size
         if self.vocab_size != 512:
             raise ValueError(
                 f"vocab_size must be exactly 512, got {self.vocab_size}")
 
-        # Set n_kv_heads to n_heads if not specified
+        # Ensure n_kv_heads is set properly
         if self.n_kv_heads is None:
             self.n_kv_heads = self.n_heads
 
-        # Validate n_kv_heads
-        if self.n_kv_heads > self.n_heads:
-            raise ValueError(
-                f"n_kv_heads ({self.n_kv_heads}) cannot be larger than n_heads ({self.n_heads})")
-
         # Validate dimensions
-        if self.dim % self.n_heads != 0:
-            raise ValueError(
-                f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
-
-        # Validate multiple_of
         if self.dim % self.multiple_of != 0:
             raise ValueError(
                 f"dim ({self.dim}) must be divisible by multiple_of ({self.multiple_of})")
+
+        if self.dim % self.n_heads != 0:
+            raise ValueError(
+                f"dim ({self.dim}) must be divisible by n_heads ({self.n_heads})")
 
 
 # Create an instance of ModelArgs

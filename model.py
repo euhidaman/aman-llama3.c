@@ -1,6 +1,7 @@
 # model.py
 
 import math
+import struct
 from typing import Optional, Tuple
 from dataclasses import asdict
 
@@ -579,3 +580,75 @@ class Llama3(nn.Module):
         print(f"- Trainable Parameters: {trainable_params:.2f}M")
         print(f"- Model Dtype: {self.dtype}")
         print(f"- Device: {next(self.parameters()).device}")
+
+
+def export_model_to_c(model, filepath, version=1):
+    """Export model to C-compatible binary format"""
+    try:
+        with open(filepath, 'wb') as f:
+            # Write config header matching run.c struct layout
+            config = struct.pack(
+                'iiiiiifiif',  # Format string for 10 values
+                model.args.dim,           # dim (int)
+                model.args.n_layers,      # n_layers (int)
+                model.args.n_heads,       # n_heads (int)
+                model.args.n_kv_heads,    # n_kv_heads (int)
+                # vocab_size (int) - must be exactly 512
+                512,
+                model.args.max_seq_len,   # seq_len (int)
+                model.args.norm_eps,      # norm_eps (float)
+                model.hidden_dim,         # hidden_dim (int)
+                model.args.multiple_of,   # multiple_of (int)
+                model.args.rope_theta     # rope_theta (float)
+            )
+            f.write(config)
+
+            # Write model weights
+            for param in model.parameters():
+                param_data = param.detach().cpu().float().numpy()
+                f.write(param_data.tobytes())
+
+        print("\nModel binary export successful!")
+        print(f"Saved to: {filepath}")
+        return True
+
+    except Exception as e:
+        print(f"\nError exporting model binary: {e}")
+        return False
+
+
+def validate_model_binary(filepath):
+    """Validate the exported model binary format"""
+    try:
+        with open(filepath, 'rb') as f:
+            # Read config
+            # 10 values * 4 bytes each
+            config = struct.unpack('iiiiiifiif', f.read(40))
+
+            # Unpack config values
+            dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len, \
+                norm_eps, hidden_dim, multiple_of, rope_theta = config
+
+            print("\nModel Configuration:")
+            print(f"dim: {dim}")
+            print(f"n_layers: {n_layers}")
+            print(f"n_heads: {n_heads}")
+            print(f"n_kv_heads: {n_kv_heads}")
+            print(f"vocab_size: {vocab_size}")
+            print(f"seq_len: {seq_len}")
+            print(f"norm_eps: {norm_eps}")
+            print(f"hidden_dim: {hidden_dim}")
+            print(f"multiple_of: {multiple_of}")
+            print(f"rope_theta: {rope_theta}")
+
+            # Validate critical values
+            assert vocab_size == 512, f"vocab_size must be 512, got {vocab_size}"
+            assert dim > 0 and dim % multiple_of == 0, f"Invalid dim: {dim}"
+            assert n_layers > 0, f"Invalid n_layers: {n_layers}"
+            assert n_heads > 0, f"Invalid n_heads: {n_heads}"
+
+            return True
+
+    except Exception as e:
+        print(f"\nError validating model binary: {e}")
+        return False

@@ -312,24 +312,24 @@ def create_lr_scheduler(optimizer, warmup_iters, max_iters, min_lr, max_lr):
 
 
 def save_checkpoint(model, optimizer, scheduler, iteration, loss, save_dir):
-    """Save a training checkpoint"""
     checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
         'iteration': iteration,
         'loss': loss,
-        'dtype': str(model.dtype),
-        'params': asdict(model.params)
     }
-
-    # Convert dtype in params to string
-    if 'dtype' in checkpoint['params']:
-        checkpoint['params']['dtype'] = str(checkpoint['params']['dtype'])
 
     checkpoint_path = os.path.join(save_dir, f'checkpoint_iter_{iteration}.pt')
     torch.save(checkpoint, checkpoint_path)
-    print(f"\nSaved checkpoint to {checkpoint_path}")
+    print(f"Saved checkpoint to {checkpoint_path}")
+
+    # Export C-compatible binary
+    binary_path = os.path.join(save_dir, 'model.bin')
+    if export_model_to_c(model, binary_path):
+        # Validate the exported binary
+        if not validate_model_binary(binary_path):
+            print("\nWarning: Binary validation failed! Please check the exported files.")
 
 
 def validate_model_binary(filepath):
