@@ -88,27 +88,20 @@ except Exception as e:
 
 @dataclass
 class ModelArgs:
-    # Model architecture
-    dim: int = 128  # transformer dimension
-    n_layers: int = 12  # number of layers
-    n_heads: int = 4  # number of attention heads
-    # number of key/value heads (defaults to n_heads)
+    dim: int = 256                # Changed from 128 to 256 to be divisible by multiple_of
+    n_layers: int = 12
+    n_heads: int = 4
     n_kv_heads: Optional[int] = None
-    vocab_size: int = 512  # fixed vocabulary size for C compatibility
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    # optional multiply constant for FFN hidden dimension
+    vocab_size: int = 512         # Fixed for our tokenizer
+    multiple_of: int = 256        # This is our constraint
     ffn_dim_multiplier: Optional[float] = None
-
-    # Model configuration
-    norm_eps: float = 1e-5  # Layer norm epsilon
-    rope_theta: float = 10000  # RoPE theta parameter
-    max_batch_size: int = 24  # maximum batch size for training
-    max_seq_len: int = 512  # maximum sequence length
-    dropout_rate: float = 0.1  # dropout rate
-
-    # Hardware configuration
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
+    max_batch_size: int = 24
+    max_seq_len: int = 512
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dtype: torch.dtype = get_torch_dtype(dtype_str)
+    dropout_rate: float = 0.1
+    dtype: torch.dtype = torch.float32
 
     def __post_init__(self):
         """Validate and set derived parameters"""
