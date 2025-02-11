@@ -43,42 +43,23 @@ class Tokenizer:
         mergeable_ranks = load_tokenizer_model(model_path)
         self.model_path = model_path
 
-        # BOS / EOS token IDs
-        num_base_tokens = len(mergeable_ranks)
-        num_reserved_special_tokens = 256
-
-        special_tokens = [
-            "<|begin_of_text|>",
-            "<|end_of_text|>",
-            "<|reserved_special_token_0|>",
-            "<|reserved_special_token_1|>",
-            "<|reserved_special_token_2|>",
-            "<|reserved_special_token_3|>",
-            "<|start_header_id|>",
-            "<|end_header_id|>",
-            "<|reserved_special_token_4|>",
-            "<|eot_id|>",  # end of turn
-        ] + [
-            f"<|reserved_special_token_{i}|>"
-            for i in range(5, num_reserved_special_tokens - 5)
-        ]
-        self.special_tokens = {
-            token: num_base_tokens + i for i, token in enumerate(special_tokens)
+        # Use just a few essential special tokens within the 512 limit
+        essential_special_tokens = {
+            "<|begin_of_text|>": 510,  # Use last few tokens for special tokens
+            "<|end_of_text|>": 511,
         }
+
         self.model = tiktoken.Encoding(
             name=Path(model_path).name,
             pat_str=self.pat_str,
             mergeable_ranks=mergeable_ranks,
-            special_tokens=self.special_tokens,
+            special_tokens=essential_special_tokens,
         )
         self.n_words = self.model.n_vocab
-        self.bos_id = self.special_tokens["<|begin_of_text|>"]
-        self.eos_id = self.special_tokens["<|end_of_text|>"]
+        self.bos_id = essential_special_tokens["<|begin_of_text|>"]
+        self.eos_id = essential_special_tokens["<|end_of_text|>"]
         self.pad_id = -1
-        self.stop_tokens = {
-            self.special_tokens["<|end_of_text|>"],
-            self.special_tokens["<|eot_id|>"],
-        }
+        self.stop_tokens = {self.eos_id}
 
     def encode(self, s: str, bos: bool, eos: bool, allowed_special=None, disallowed_special=()) -> List[int]:
         assert isinstance(s, str)
@@ -273,26 +254,29 @@ class Tokenizer:
         sorted_tokens = sorted(token_freqs.items(),
                                key=lambda x: x[1], reverse=True)
 
-        # Create final vocabulary with exactly vocab_size tokens
+        # Create final vocabulary with exactly vocab_size-2 tokens (reserve 2 for special tokens)
         print(f"\nStep 4/4: Creating final vocabulary of size {vocab_size}...")
         final_vocab = {}
+        available_slots = vocab_size - 2  # Reserve 2 slots for BOS/EOS
 
         # First add base vocabulary (0-255)
+        base_vocab = {bytes([i]): i for i in range(256)}
         final_vocab.update(base_vocab)
 
-        # Then add the most frequent tokens up to available_vocab_slots
+        # Then add the most frequent tokens up to available slots
         added_tokens = 0
+        remaining_slots = available_slots - len(base_vocab)
+
         for token, freq in sorted_tokens:
-            if added_tokens >= available_vocab_slots:
+            if added_tokens >= remaining_slots:
                 break
             if token not in final_vocab:  # Ensure no overlap with base vocab
-                final_vocab[token] = 256 + added_tokens
+                final_vocab[token] = len(final_vocab)
                 added_tokens += 1
 
-        # If we still haven't reached vocab_size, add padding tokens
-        while len(final_vocab) < vocab_size:
-            pad_token = f"[PAD{len(final_vocab)-256}]".encode("utf-8")
-            final_vocab[pad_token] = len(final_vocab)
+        # Add special tokens at the end
+        final_vocab[b"<|begin_of_text|>"] = vocab_size - 2
+        final_vocab[b"<|end_of_text|>"] = vocab_size - 1
 
         # Verify we have exactly vocab_size tokens
         assert len(
