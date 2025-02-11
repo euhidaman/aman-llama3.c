@@ -103,6 +103,7 @@ class ModelArgs:
     rope_theta: float = 10000
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     dtype: torch.dtype = torch.float32
+    dropout_rate: float = 0.0    # Add dropout rate parameter
 
     def __post_init__(self):
         # Strict validation for vocab_size
