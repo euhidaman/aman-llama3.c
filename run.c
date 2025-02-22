@@ -132,31 +132,100 @@ void malloc_run_state(RunState *s, Config *p)
     // Calculate KV dimensions
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
 
-    fprintf(stderr, "\nAllocating RunState buffers:\n");
+    // Calculate buffer sizes
+    size_t x_size = p->dim * sizeof(float);
+    size_t xb_size = p->dim * sizeof(float);
+    size_t xb2_size = p->dim * sizeof(float);
+    size_t hb_size = p->hidden_dim * sizeof(float);
+    size_t hb2_size = p->hidden_dim * sizeof(float);
+    size_t q_size = p->dim * sizeof(float);
+    size_t k_size = kv_dim * sizeof(float);
+    size_t v_size = kv_dim * sizeof(float);
+    size_t att_size = p->n_heads * p->seq_len * sizeof(float);
+    size_t logits_size = p->vocab_size * sizeof(float);
+    size_t key_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
+    size_t value_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
 
-    // Allocate with error checking
+    // Print debug information
+    fprintf(stderr, "\nRunState allocation details:\n");
+    fprintf(stderr, "Model dimensions:\n");
+    fprintf(stderr, "- dim: %d\n", p->dim);
+    fprintf(stderr, "- kv_dim: %d\n", kv_dim);
+    fprintf(stderr, "- hidden_dim: %d\n", p->hidden_dim);
+    fprintf(stderr, "- n_layers: %d\n", p->n_layers);
+    fprintf(stderr, "- n_heads: %d\n", p->n_heads);
+    fprintf(stderr, "- seq_len: %d\n", p->seq_len);
+
+    fprintf(stderr, "\nBuffer sizes:\n");
+    fprintf(stderr, "- x:          %8zu bytes\n", x_size);
+    fprintf(stderr, "- xb:         %8zu bytes\n", xb_size);
+    fprintf(stderr, "- xb2:        %8zu bytes\n", xb2_size);
+    fprintf(stderr, "- hb:         %8zu bytes\n", hb_size);
+    fprintf(stderr, "- hb2:        %8zu bytes\n", hb2_size);
+    fprintf(stderr, "- q:          %8zu bytes\n", q_size);
+    fprintf(stderr, "- k:          %8zu bytes\n", k_size);
+    fprintf(stderr, "- v:          %8zu bytes\n", v_size);
+    fprintf(stderr, "- att:        %8zu bytes\n", att_size);
+    fprintf(stderr, "- logits:     %8zu bytes\n", logits_size);
+    fprintf(stderr, "- key_cache:  %8zu bytes\n", key_cache_size);
+    fprintf(stderr, "- value_cache:%8zu bytes\n", value_cache_size);
+
+    size_t total_size = x_size + xb_size + xb2_size + hb_size + hb2_size +
+                        q_size + k_size + v_size + att_size + logits_size +
+                        key_cache_size + value_cache_size;
+
+    fprintf(stderr, "\nTotal allocation size: %.2f MB\n", total_size / (1024.0 * 1024.0));
+    fprintf(stderr, "Attempting allocations...\n");
+
+    // Perform allocations with debug output
     s->x = calloc(p->dim, sizeof(float));
-    s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
-    s->hb = calloc(p->hidden_dim, sizeof(float));
-    s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->q = calloc(p->dim, sizeof(float));
-    s->k = calloc(kv_dim, sizeof(float));
-    s->v = calloc(kv_dim, sizeof(float));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    s->logits = calloc(p->vocab_size, sizeof(float));
-    s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    fprintf(stderr, "- x allocated: %s\n", s->x ? "success" : "FAILED");
 
-    // Check allocations
+    s->xb = calloc(p->dim, sizeof(float));
+    fprintf(stderr, "- xb allocated: %s\n", s->xb ? "success" : "FAILED");
+
+    s->xb2 = calloc(p->dim, sizeof(float));
+    fprintf(stderr, "- xb2 allocated: %s\n", s->xb2 ? "success" : "FAILED");
+
+    s->hb = calloc(p->hidden_dim, sizeof(float));
+    fprintf(stderr, "- hb allocated: %s\n", s->hb ? "success" : "FAILED");
+
+    s->hb2 = calloc(p->hidden_dim, sizeof(float));
+    fprintf(stderr, "- hb2 allocated: %s\n", s->hb2 ? "success" : "FAILED");
+
+    s->q = calloc(p->dim, sizeof(float));
+    fprintf(stderr, "- q allocated: %s\n", s->q ? "success" : "FAILED");
+
+    s->k = calloc(kv_dim, sizeof(float));
+    fprintf(stderr, "- k allocated: %s\n", s->k ? "success" : "FAILED");
+
+    s->v = calloc(kv_dim, sizeof(float));
+    fprintf(stderr, "- v allocated: %s\n", s->v ? "success" : "FAILED");
+
+    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
+    fprintf(stderr, "- att allocated: %s\n", s->att ? "success" : "FAILED");
+
+    s->logits = calloc(p->vocab_size, sizeof(float));
+    fprintf(stderr, "- logits allocated: %s\n", s->logits ? "success" : "FAILED");
+
+    s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    fprintf(stderr, "- key_cache allocated: %s\n", s->key_cache ? "success" : "FAILED");
+
+    s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    fprintf(stderr, "- value_cache allocated: %s\n", s->value_cache ? "success" : "FAILED");
+
+    // Check all allocations
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q ||
         !s->k || !s->v || !s->att || !s->logits ||
         !s->key_cache || !s->value_cache)
     {
-        fprintf(stderr, "Memory allocation failed!\n");
+        fprintf(stderr, "\nERROR: Memory allocation failed!\n");
+        fprintf(stderr, "Required memory: %.2f MB\n", total_size / (1024.0 * 1024.0));
         free_run_state(s);
         exit(EXIT_FAILURE);
     }
+
+    fprintf(stderr, "\nAll memory allocations successful!\n");
 }
 
 void free_run_state(RunState *s)
