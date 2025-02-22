@@ -188,16 +188,16 @@ def export_model_to_c(model, filepath):
             # Write actual config values - allow any values
             config = struct.pack(
                 'iiiiiifiif',
-                model.args.dim,          # dim
-                model.args.n_layers,     # n_layers
-                model.args.n_heads,      # n_heads
-                model.args.n_kv_heads,   # n_kv_heads
-                model.args.vocab_size,   # vocab_size
-                model.args.max_seq_len,  # seq_len
-                model.args.norm_eps,     # norm_eps
+                model.params.dim,          # dim
+                model.params.n_layers,     # n_layers
+                model.params.n_heads,      # n_heads
+                model.params.n_kv_heads,   # n_kv_heads
+                model.params.vocab_size,   # vocab_size
+                model.params.max_seq_len,  # seq_len
+                model.params.norm_eps,     # norm_eps
                 model.hidden_dim,        # hidden_dim
-                model.args.multiple_of,  # multiple_of
-                model.args.rope_theta    # rope_theta
+                model.params.multiple_of,  # multiple_of
+                model.params.rope_theta    # rope_theta
             )
             f.write(config)
 
@@ -565,14 +565,15 @@ def main():
                     raise e
 
         # Save final model
-        # Save final model in PyTorch format
         final_path = save_dir / 'final_model.pt'
         torch.save(model.state_dict(), final_path)
 
         # Export model to binary format for C inference
         binary_path = save_dir / 'model.bin'
-        # Use version 1 format
-        export_model_to_c(model, binary_path, version=1)
+        if export_model_to_c(model, binary_path):  # Removed version argument
+            print(f"\nModel exported successfully to {binary_path}")
+        else:
+            print("\nWarning: Failed to export model to binary format")
 
         print("\nValidating exported binaries...")
         validation_success = validate_model_binary(binary_path)
