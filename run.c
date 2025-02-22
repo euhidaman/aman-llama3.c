@@ -129,6 +129,7 @@ void free_transformer(Transformer *t)
 
 void malloc_run_state(RunState *s, Config *p)
 {
+    // Remove the duplicate kv_dim declaration
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
 
     // Print debug info
@@ -138,8 +139,8 @@ void malloc_run_state(RunState *s, Config *p)
 
     // Print memory requirements
     size_t total_size = 0;
-    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
 
+    // Remove second declaration of kv_dim here
     total_size += p->dim * sizeof(float);                            // x
     total_size += p->dim * sizeof(float);                            // xb
     total_size += p->dim * sizeof(float);                            // xb2
@@ -422,13 +423,14 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     fprintf(stderr, "Checkpoint size: %.2f MB\n", *file_size / (1024.0 * 1024.0));
     fprintf(stderr, "Expected size: %.2f MB\n", expected_size / (1024.0 * 1024.0));
 
-    // Allow small difference in file size (within 1KB)
-    if (abs(*file_size - expected_size) > 1024)
+    // Fix the file size comparison
+    if (*file_size < expected_size ? (expected_size - *file_size) : (*file_size - expected_size) > 1024)
     {
         fprintf(stderr, "\nWarning: File size mismatch, but continuing anyway.\n");
         fprintf(stderr, "Expected: %zu bytes\n", expected_size);
         fprintf(stderr, "Got: %zd bytes\n", *file_size);
-        fprintf(stderr, "Difference: %zd bytes\n\n", expected_size - *file_size);
+        fprintf(stderr, "Difference: %zd bytes\n\n",
+                *file_size < expected_size ? expected_size - *file_size : *file_size - expected_size);
     }
 
     // Continue with memory mapping regardless of size mismatch
@@ -501,7 +503,9 @@ void matmul(float *out, float *x, float *w, int n, int d)
 {
     // W (d,n) @ x (n,) -> out (d,)
     int i;
+#ifdef _OPENMP
 #pragma omp parallel for private(i)
+#endif
     for (i = 0; i < d; i++)
     {
         float val = 0.0f;
@@ -576,7 +580,9 @@ float *forward(Transformer *transformer, int token, int pos)
 
         // Multihead attention
         int h;
+#ifdef _OPENMP
 #pragma omp parallel for private(h)
+#endif
         for (h = 0; h < p->n_heads; h++)
         {
             float *q = s->q + h * head_size;
