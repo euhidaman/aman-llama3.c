@@ -519,10 +519,17 @@ float *forward(Transformer *transformer, int token, int pos)
     Config *p = &transformer->config;
     TransformerWeights *w = &transformer->weights;
     RunState *s = &transformer->state;
-
-    fprintf(stderr, "\nDebug: Forward pass for token %d at pos %d\n", token, pos);
+    float *x = s->x;
+    int dim = p->dim;
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    int kv_mul = p->n_heads / p->n_kv_heads;
+    int head_size = dim / p->n_heads;
 
     // Validate parameters
+    fprintf(stderr, "\nForward pass validation:\n");
+    fprintf(stderr, "- Token: %d (max: %d)\n", token, p->vocab_size - 1);
+    fprintf(stderr, "- Position: %d (max: %d)\n", pos, p->seq_len - 1);
+
     if (token >= p->vocab_size)
     {
         fprintf(stderr, "Error: token %d exceeds vocab_size %d\n", token, p->vocab_size);
@@ -534,20 +541,29 @@ float *forward(Transformer *transformer, int token, int pos)
         exit(1);
     }
 
-    float *x = s->x;
-    int dim = p->dim;
-    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    int kv_mul = p->n_heads / p->n_kv_heads;
-    int head_size = dim / p->n_heads;
+    // Memory validation
+    fprintf(stderr, "\nMemory validation:\n");
+    fprintf(stderr, "- Token embedding table: %p\n", (void *)w->token_embedding_table);
+    float *content_row = w->token_embedding_table + token * dim;
+    fprintf(stderr, "- Content row: %p (offset: %ld)\n", (void *)content_row, token * dim);
+
+    // Print content row values for debugging
+    fprintf(stderr, "Content row first 5 values: ");
+    for (int i = 0; i < 5 && i < dim; i++)
+    {
+        fprintf(stderr, "%f ", content_row[i]);
+    }
+    fprintf(stderr, "\n");
 
     // Copy token embedding
-    float *content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim * sizeof(float));
 
     // Forward all layers
     for (int l = 0; l < p->n_layers; l++)
     {
-        // Attention RMSNorm
+        fprintf(stderr, "\nProcessing layer %d/%d:\n", l + 1, p->n_layers);
+
+        // Attention
         rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
 
         // QKV projections
@@ -555,27 +571,23 @@ float *forward(Transformer *transformer, int token, int pos)
         matmul(s->k, s->xb, w->wk + l * dim * kv_dim, dim, kv_dim);
         matmul(s->v, s->xb, w->wv + l * dim * kv_dim, dim, kv_dim);
 
-        // Apply RoPE rotation
+        // RoPE rotation
         apply_rope(s->q, s->k, pos, dim, head_size, p->rope_theta);
 
-        // Cache k,v at this position
+        // Cache k,v
         int loff = l * p->seq_len * kv_dim;
         float *key_cache_row = s->key_cache + loff + pos * kv_dim;
         float *value_cache_row = s->value_cache + loff + pos * kv_dim;
         memcpy(key_cache_row, s->k, kv_dim * sizeof(float));
         memcpy(value_cache_row, s->v, kv_dim * sizeof(float));
 
-        // Multihead attention
-        int h;
-#ifdef _OPENMP
-#pragma omp parallel for private(h)
-#endif
-        for (h = 0; h < p->n_heads; h++)
+        // Multi-head attention
+        for (int h = 0; h < p->n_heads; h++)
         {
             float *q = s->q + h * head_size;
             float *att = s->att + h * p->seq_len;
 
-            // Get attention scores for this head
+            // Attention scores
             for (int t = 0; t <= pos; t++)
             {
                 float *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -584,16 +596,14 @@ float *forward(Transformer *transformer, int token, int pos)
                 {
                     score += q[i] * k[i];
                 }
-                score /= sqrtf(head_size);
-                att[t] = score;
+                att[t] = score / sqrtf(head_size);
             }
 
-            // Softmax
+            // Softmax and weighted sum
             softmax(att, pos + 1);
-
-            // Weighted sum of values
             float *xb = s->xb + h * head_size;
             memset(xb, 0, head_size * sizeof(float));
+
             for (int t = 0; t <= pos; t++)
             {
                 float *v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -605,30 +615,28 @@ float *forward(Transformer *transformer, int token, int pos)
             }
         }
 
-        // Final projection and residual
+        // Post-attention
         matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
         for (int i = 0; i < dim; i++)
         {
             x[i] += s->xb2[i];
         }
 
-        // FFN RMSNorm
-        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
-
         // FFN
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
         matmul(s->hb, s->xb, w->w1 + l * dim * p->hidden_dim, dim, p->hidden_dim);
         matmul(s->hb2, s->xb, w->w3 + l * dim * p->hidden_dim, dim, p->hidden_dim);
 
-        // SwiGLU non-linearity
+        // SwiGLU
         for (int i = 0; i < p->hidden_dim; i++)
         {
             float val = s->hb[i];
-            val *= (1.0f / (1.0f + expf(-val))); // silu
-            val *= s->hb2[i];                    // multiply with w3 output
+            val *= (1.0f / (1.0f + expf(-val)));
+            val *= s->hb2[i];
             s->hb[i] = val;
         }
 
-        // Final projection and residual
+        // Final projection
         matmul(s->xb, s->hb, w->w2 + l * p->hidden_dim * dim, p->hidden_dim, dim);
         for (int i = 0; i < dim; i++)
         {
@@ -636,21 +644,18 @@ float *forward(Transformer *transformer, int token, int pos)
         }
     }
 
-    // Final RMSNorm
+    // Final normalization and classifier
     rmsnorm(x, x, w->rms_final_weight, dim);
-
-    // Classifier into logits
     matmul(s->logits, x, w->wcls, dim, p->vocab_size);
 
-    // Add validation before returning
-    for (int i = 0; i < p->vocab_size; i++)
+    // Validate logits
+    fprintf(stderr, "\nLogits validation:\n");
+    fprintf(stderr, "First 5 logits: ");
+    for (int i = 0; i < 5 && i < p->vocab_size; i++)
     {
-        if (!isfinite(s->logits[i]))
-        {
-            fprintf(stderr, "Warning: Invalid logit value at index %d\n", i);
-            s->logits[i] = 0.0f;
-        }
+        fprintf(stderr, "%f ", s->logits[i]);
     }
+    fprintf(stderr, "\n");
 
     return s->logits;
 }
