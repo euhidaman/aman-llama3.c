@@ -211,6 +211,10 @@ class Llama3(nn.Module):
         self.tokenizer = tokenizer
         self.dtype = params.dtype
 
+        # Add hidden_dim calculation
+        self.hidden_dim = params.dim * 4  # Standard multiplier for FFN hidden dimension
+
+        # Rest of initialization remains the same
         self.tok_embeddings = nn.Embedding(
             params.vocab_size, params.dim).to(dtype=self.dtype)
 
