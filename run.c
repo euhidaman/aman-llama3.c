@@ -22,16 +22,16 @@
 
 typedef struct
 {
-    int dim;          // transformer dimension (default: 128)
-    int n_layers;     // number of layers (default: 12)
-    int n_heads;      // number of attention heads (default: 4)
-    int n_kv_heads;   // number of key/value heads (default: 4)
-    int vocab_size;   // vocabulary size (must be 512)
-    int seq_len;      // max sequence length (default: 512)
-    float norm_eps;   // RMSNorm epsilon value (default: 1e-5)
-    int hidden_dim;   // hidden dimension for FFN layers (default: 512)
-    int multiple_of;  // hidden layer size multiple (default: 256)
-    float rope_theta; // RoPE theta value (default: 10000.0)
+    int dim;          // transformer dimension (256)
+    int n_layers;     // number of layers (12)
+    int n_heads;      // number of attention heads (4)
+    int n_kv_heads;   // number of key/value heads (4)
+    int vocab_size;   // vocabulary size (512)
+    int seq_len;      // max sequence length (512)
+    float norm_eps;   // RMSNorm epsilon (1e-5)
+    int hidden_dim;   // hidden dimension (1024)
+    int multiple_of;  // hidden layer size multiple (256)
+    float rope_theta; // RoPE theta value (10000.0)
 } Config;
 
 typedef struct
@@ -312,39 +312,44 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     }
 
     // Validate configuration values
-    if (config->dim <= 0 || config->dim > 8192)
+    if (config->dim != 256)
     {
-        fprintf(stderr, "Error: Invalid dimension %d (should be between 1 and 8192)\n", config->dim);
+        fprintf(stderr, "Error: Model dimension must be 256\n");
         exit(EXIT_FAILURE);
     }
-    if (config->n_layers <= 0 || config->n_layers > 100)
+    if (config->n_layers != 12)
     {
-        fprintf(stderr, "Error: Invalid number of layers %d (should be between 1 and 100)\n",
-                config->n_layers);
+        fprintf(stderr, "Error: Number of layers must be 12\n");
         exit(EXIT_FAILURE);
     }
-    if (config->n_heads <= 0 || config->n_heads > 64)
+    if (config->n_heads != 4)
     {
-        fprintf(stderr, "Error: Invalid number of heads %d (should be between 1 and 64)\n",
-                config->n_heads);
+        fprintf(stderr, "Error: Number of heads must be 4\n");
         exit(EXIT_FAILURE);
     }
-    if (config->n_kv_heads <= 0 || config->n_kv_heads > config->n_heads)
+    if (config->n_kv_heads != 4)
     {
-        fprintf(stderr, "Error: Invalid number of KV heads %d (should be between 1 and %d)\n",
-                config->n_kv_heads, config->n_heads);
+        fprintf(stderr, "Error: Number of KV heads must be 4\n");
         exit(EXIT_FAILURE);
     }
     if (config->vocab_size != 512)
     {
-        fprintf(stderr, "Error: Invalid vocabulary size %d (must be exactly 512)\n",
-                config->vocab_size);
+        fprintf(stderr, "Error: Vocabulary size must be 512\n");
         exit(EXIT_FAILURE);
     }
-    if (config->seq_len <= 0 || config->seq_len > 2048)
+    if (config->seq_len != 512)
     {
-        fprintf(stderr, "Error: Invalid sequence length %d (should be between 1 and 2048)\n",
-                config->seq_len);
+        fprintf(stderr, "Error: Sequence length must be 512\n");
+        exit(EXIT_FAILURE);
+    }
+    if (config->hidden_dim != 1024)
+    {
+        fprintf(stderr, "Error: Hidden dimension must be 1024\n");
+        exit(EXIT_FAILURE);
+    }
+    if (config->multiple_of != 256)
+    {
+        fprintf(stderr, "Error: Multiple of must be 256\n");
         exit(EXIT_FAILURE);
     }
 
@@ -990,9 +995,9 @@ int main(int argc, char *argv[])
     // Default parameters
     char *checkpoint_path = NULL; // model.bin
     char *tokenizer_path = "tokenizer.bin";
-    float temperature = 1.0f;
-    float topp = 0.9f;
-    int steps = 256;
+    float temperature = 0.6f; // Changed from 1.0f to match your settings
+    float topp = 0.9f;        // Keep as is
+    int steps = 250;          // Changed from 256 to match your max_gen_len
     char *prompt = NULL;
     unsigned long long rng_seed = 0;
 
