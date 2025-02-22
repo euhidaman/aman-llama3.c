@@ -129,35 +129,12 @@ void free_transformer(Transformer *t)
 
 void malloc_run_state(RunState *s, Config *p)
 {
+    // Calculate KV dimensions
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    size_t total_size = 0;
 
-    fprintf(stderr, "\nRunState memory allocation:\n");
-    fprintf(stderr, "kv_dim: %d\n", kv_dim);
-    fprintf(stderr, "hidden_dim: %d\n", p->hidden_dim);
+    fprintf(stderr, "\nAllocating RunState buffers:\n");
 
-    // Calculate buffer sizes
-    size_t x_size = p->dim * sizeof(float);
-    size_t xb_size = p->dim * sizeof(float);
-    size_t xb2_size = p->dim * sizeof(float);
-    size_t hb_size = p->hidden_dim * sizeof(float);
-    size_t hb2_size = p->hidden_dim * sizeof(float);
-    size_t q_size = p->dim * sizeof(float);
-    size_t k_size = kv_dim * sizeof(float);
-    size_t v_size = kv_dim * sizeof(float);
-    size_t att_size = p->n_heads * p->seq_len * sizeof(float);
-    size_t logits_size = p->vocab_size * sizeof(float);
-    size_t key_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
-    size_t value_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
-
-    total_size = x_size + xb_size + xb2_size + hb_size + hb2_size +
-                 q_size + k_size + v_size + att_size + logits_size +
-                 key_cache_size + value_cache_size;
-
-    fprintf(stderr, "Attempting to allocate %.2f MB of memory...\n",
-            total_size / (1024.0 * 1024.0));
-
-    // Allocate all buffers
+    // Allocate with error checking
     s->x = calloc(p->dim, sizeof(float));
     s->xb = calloc(p->dim, sizeof(float));
     s->xb2 = calloc(p->dim, sizeof(float));
@@ -171,22 +148,15 @@ void malloc_run_state(RunState *s, Config *p)
     s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
     s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
 
-    // Validate allocations
+    // Check allocations
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q ||
-        !s->k || !s->v || !s->att || !s->logits || !s->key_cache ||
-        !s->value_cache)
+        !s->k || !s->v || !s->att || !s->logits ||
+        !s->key_cache || !s->value_cache)
     {
-        fprintf(stderr, "malloc failed! Attempted to allocate %.2f MB\n",
-                total_size / (1024.0 * 1024.0));
-        goto malloc_error;
+        fprintf(stderr, "Memory allocation failed!\n");
+        free_run_state(s);
+        exit(EXIT_FAILURE);
     }
-
-    fprintf(stderr, "Memory allocation successful!\n");
-    return;
-
-malloc_error:
-    free_run_state(s);
-    exit(EXIT_FAILURE);
 }
 
 void free_run_state(RunState *s)
@@ -207,89 +177,100 @@ void free_run_state(RunState *s)
 
 void memory_map_weights(TransformerWeights *w, Config *p, float *ptr)
 {
-    // Calculate dimensions correctly
+    // Calculate dimensions
     int head_size = p->dim / p->n_heads;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    size_t offset = 0;
+    size_t running_offset = 0;
 
-    // Debug dimensions
-    fprintf(stderr, "\nMemory mapping offsets:\n");
+    fprintf(stderr, "\nMemory mapping details:\n");
     fprintf(stderr, "head_size: %d\n", head_size);
     fprintf(stderr, "kv_dim: %d\n", kv_dim);
 
-    // Token embeddings
+    // Map weights in the exact order they were written
     w->token_embedding_table = ptr;
-    offset = p->vocab_size * p->dim;
-    ptr += offset;
-    fprintf(stderr, "token_embedding offset: %zu\n", offset);
+    running_offset = p->vocab_size * p->dim;
+    ptr += running_offset;
 
-    // Attention weights per layer
-    w->rms_att_weight = ptr;
-    ptr += p->n_layers * p->dim;
-    offset = p->n_layers * p->dim;
-    fprintf(stderr, "rms_att offset: %zu\n", offset);
+    // Layer weights
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->rms_att_weight = ptr;
+        ptr += p->dim;
+        running_offset += p->dim;
+    }
 
-    // Q, K, V projections
-    w->wq = ptr;
-    ptr += p->n_layers * p->dim * p->dim;
-    offset = p->n_layers * p->dim * p->dim;
-    fprintf(stderr, "wq offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->wq = ptr;
+        ptr += p->dim * p->dim;
+        running_offset += p->dim * p->dim;
+    }
 
-    w->wk = ptr;
-    ptr += p->n_layers * p->dim * kv_dim;
-    offset = p->n_layers * p->dim * kv_dim;
-    fprintf(stderr, "wk offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->wk = ptr;
+        ptr += p->dim * kv_dim;
+        running_offset += p->dim * kv_dim;
+    }
 
-    w->wv = ptr;
-    ptr += p->n_layers * p->dim * kv_dim;
-    offset = p->n_layers * p->dim * kv_dim;
-    fprintf(stderr, "wv offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->wv = ptr;
+        ptr += p->dim * kv_dim;
+        running_offset += p->dim * kv_dim;
+    }
 
-    w->wo = ptr;
-    ptr += p->n_layers * kv_dim * p->dim;
-    offset = p->n_layers * kv_dim * p->dim;
-    fprintf(stderr, "wo offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->wo = ptr;
+        ptr += p->dim * p->dim;
+        running_offset += p->dim * p->dim;
+    }
 
-    // FFN weights
-    w->rms_ffn_weight = ptr;
-    ptr += p->n_layers * p->dim;
-    offset = p->n_layers * p->dim;
-    fprintf(stderr, "rms_ffn offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->rms_ffn_weight = ptr;
+        ptr += p->dim;
+        running_offset += p->dim;
+    }
 
-    w->w1 = ptr;
-    ptr += p->n_layers * p->dim * p->hidden_dim;
-    offset = p->n_layers * p->dim * p->hidden_dim;
-    fprintf(stderr, "w1 offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->w1 = ptr;
+        ptr += p->dim * p->hidden_dim;
+        running_offset += p->dim * p->hidden_dim;
+    }
 
-    w->w2 = ptr;
-    ptr += p->n_layers * p->hidden_dim * p->dim;
-    offset = p->n_layers * p->hidden_dim * p->dim;
-    fprintf(stderr, "w2 offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->w2 = ptr;
+        ptr += p->hidden_dim * p->dim;
+        running_offset += p->hidden_dim * p->dim;
+    }
 
-    w->w3 = ptr;
-    ptr += p->n_layers * p->dim * p->hidden_dim;
-    offset = p->n_layers * p->dim * p->hidden_dim;
-    fprintf(stderr, "w3 offset: %zu\n", offset);
+    for (int l = 0; l < p->n_layers; l++)
+    {
+        w->w3 = ptr;
+        ptr += p->dim * p->hidden_dim;
+        running_offset += p->dim * p->hidden_dim;
+    }
 
-    // Final normalization
+    // Final norm
     w->rms_final_weight = ptr;
-    ptr += p->dim;
-    offset = p->dim;
-    fprintf(stderr, "rms_final offset: %zu\n", offset);
+    running_offset += p->dim;
 
-    // Classifier weights (shared with token embeddings)
+    // Share classifier weights with token embeddings
     w->wcls = w->token_embedding_table;
 
-    // Print total offset for verification
-    fprintf(stderr, "Total weights size: %zu bytes\n",
-            offset * sizeof(float));
+    fprintf(stderr, "Total weights mapped: %zu bytes\n",
+            running_offset * sizeof(float));
 }
 
 void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weights,
                      int *fd, float **data, ssize_t *file_size)
 {
-    fprintf(stderr, "Loading checkpoint from: %s\n", checkpoint);
 
+    // Open file first to get size
     FILE *file = fopen(checkpoint, "rb");
     if (!file)
     {
@@ -297,56 +278,19 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
         exit(EXIT_FAILURE);
     }
 
-    // Read config
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    *file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    // Read config header (40 bytes)
     if (fread(config, sizeof(Config), 1, file) != 1)
     {
-        fprintf(stderr, "Error: Failed to read config from checkpoint\n");
+        fprintf(stderr, "Error: Failed to read config\n");
         exit(EXIT_FAILURE);
     }
 
-    // Validate configuration values
-    if (config->dim != 256)
-    {
-        fprintf(stderr, "Error: Model dimension must be 256\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->n_layers != 12)
-    {
-        fprintf(stderr, "Error: Number of layers must be 12\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->n_heads != 4)
-    {
-        fprintf(stderr, "Error: Number of heads must be 4\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->n_kv_heads != 4)
-    {
-        fprintf(stderr, "Error: Number of KV heads must be 4\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->vocab_size != 512)
-    {
-        fprintf(stderr, "Error: Vocabulary size must be 512\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->seq_len != 512)
-    {
-        fprintf(stderr, "Error: Sequence length must be 512\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->hidden_dim != 1024)
-    {
-        fprintf(stderr, "Error: Hidden dimension must be 1024\n");
-        exit(EXIT_FAILURE);
-    }
-    if (config->multiple_of != 256)
-    {
-        fprintf(stderr, "Error: Multiple of must be 256\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // Print validated configuration
+    // Print config for debugging
     fprintf(stderr, "\nModel Configuration:\n");
     fprintf(stderr, "- Dimension: %d\n", config->dim);
     fprintf(stderr, "- Layers: %d\n", config->n_layers);
@@ -354,52 +298,15 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     fprintf(stderr, "- KV Heads: %d\n", config->n_kv_heads);
     fprintf(stderr, "- Vocab Size: %d\n", config->vocab_size);
     fprintf(stderr, "- Sequence Length: %d\n", config->seq_len);
+    fprintf(stderr, "- Hidden Dim: %d\n", config->hidden_dim);
 
-    // Calculate expected size more accurately
-    size_t expected_size = 40; // Config header
-    int kv_dim = (config->dim * config->n_kv_heads) / config->n_heads;
-
-    // Token embeddings
-    expected_size += config->vocab_size * config->dim * sizeof(float);
-
-    // Per layer weights with correct dimensions
-    size_t layer_weights = 0;
-    layer_weights += config->dim * sizeof(float);                      // rms_att_weight
-    layer_weights += config->dim * config->dim * sizeof(float);        // wq
-    layer_weights += config->dim * kv_dim * sizeof(float);             // wk
-    layer_weights += config->dim * kv_dim * sizeof(float);             // wv
-    layer_weights += config->dim * config->dim * sizeof(float);        // wo
-    layer_weights += config->dim * sizeof(float);                      // rms_ffn_weight
-    layer_weights += config->dim * config->hidden_dim * sizeof(float); // w1
-    layer_weights += config->hidden_dim * config->dim * sizeof(float); // w2
-    layer_weights += config->dim * config->hidden_dim * sizeof(float); // w3
-
-    expected_size += layer_weights * config->n_layers;
-    expected_size += config->dim * sizeof(float); // final rms norm
-
-    // Get actual file size
-    fseek(file, 0, SEEK_END);
-    *file_size = ftell(file);
     fclose(file);
 
-    fprintf(stderr, "Checkpoint size: %.2f MB\n", *file_size / (1024.0 * 1024.0));
-    fprintf(stderr, "Expected size: %.2f MB\n", expected_size / (1024.0 * 1024.0));
-
-    // Fix the file size comparison
-    if (*file_size < expected_size ? (expected_size - *file_size) : (*file_size - expected_size) > 1024)
-    {
-        fprintf(stderr, "\nWarning: File size mismatch, but continuing anyway.\n");
-        fprintf(stderr, "Expected: %zu bytes\n", expected_size);
-        fprintf(stderr, "Got: %zd bytes\n", *file_size);
-        fprintf(stderr, "Difference: %zd bytes\n\n",
-                *file_size < expected_size ? expected_size - *file_size : *file_size - expected_size);
-    }
-
-    // Continue with memory mapping regardless of size mismatch
+    // Memory map the file
     *fd = open(checkpoint, O_RDONLY);
     if (*fd == -1)
     {
-        fprintf(stderr, "Error: Failed to open checkpoint for memory mapping\n");
+        fprintf(stderr, "Error: Failed to open for memory mapping\n");
         exit(EXIT_FAILURE);
     }
 
@@ -411,11 +318,9 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
         exit(EXIT_FAILURE);
     }
 
-    float *weights_ptr = *data + sizeof(Config) / sizeof(float);
+    // Skip config header for weight mapping
+    float *weights_ptr = *data + 10; // 40 bytes = 10 floats
     memory_map_weights(weights, config, weights_ptr);
-
-    fprintf(stderr, "Checkpoint loaded successfully!\n\n");
-    return; // Continue even with size mismatch
 }
 
 // ----------------------------------------------------------------------------
