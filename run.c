@@ -129,116 +129,63 @@ void free_transformer(Transformer *t)
 
 void malloc_run_state(RunState *s, Config *p)
 {
-    // Remove the duplicate kv_dim declaration
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    size_t total_size = 0;
 
-    // Print debug info
     fprintf(stderr, "\nRunState memory allocation:\n");
     fprintf(stderr, "kv_dim: %d\n", kv_dim);
     fprintf(stderr, "hidden_dim: %d\n", p->hidden_dim);
 
-    // Print memory requirements
-    size_t total_size = 0;
+    // Calculate buffer sizes
+    size_t x_size = p->dim * sizeof(float);
+    size_t xb_size = p->dim * sizeof(float);
+    size_t xb2_size = p->dim * sizeof(float);
+    size_t hb_size = p->hidden_dim * sizeof(float);
+    size_t hb2_size = p->hidden_dim * sizeof(float);
+    size_t q_size = p->dim * sizeof(float);
+    size_t k_size = kv_dim * sizeof(float);
+    size_t v_size = kv_dim * sizeof(float);
+    size_t att_size = p->n_heads * p->seq_len * sizeof(float);
+    size_t logits_size = p->vocab_size * sizeof(float);
+    size_t key_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
+    size_t value_cache_size = p->n_layers * p->seq_len * kv_dim * sizeof(float);
 
-    // Remove second declaration of kv_dim here
-    total_size += p->dim * sizeof(float);                            // x
-    total_size += p->dim * sizeof(float);                            // xb
-    total_size += p->dim * sizeof(float);                            // xb2
-    total_size += p->hidden_dim * sizeof(float);                     // hb
-    total_size += p->hidden_dim * sizeof(float);                     // hb2
-    total_size += p->dim * sizeof(float);                            // q
-    total_size += kv_dim * sizeof(float);                            // k
-    total_size += kv_dim * sizeof(float);                            // v
-    total_size += p->n_heads * p->seq_len * sizeof(float);           // att
-    total_size += p->vocab_size * sizeof(float);                     // logits
-    total_size += p->n_layers * p->seq_len * kv_dim * sizeof(float); // key_cache
-    total_size += p->n_layers * p->seq_len * kv_dim * sizeof(float); // value_cache
+    total_size = x_size + xb_size + xb2_size + hb_size + hb2_size +
+                 q_size + k_size + v_size + att_size + logits_size +
+                 key_cache_size + value_cache_size;
 
-    fprintf(stderr, "Attempting to allocate %.2f MB of memory...\n", total_size / (1024.0 * 1024.0));
+    fprintf(stderr, "Attempting to allocate %.2f MB of memory...\n",
+            total_size / (1024.0 * 1024.0));
 
-    // Allocate memory with error checking
+    // Allocate all buffers
     s->x = calloc(p->dim, sizeof(float));
-    if (!s->x)
-        goto malloc_error;
-
     s->xb = calloc(p->dim, sizeof(float));
-    if (!s->xb)
-        goto malloc_error;
-
     s->xb2 = calloc(p->dim, sizeof(float));
-    if (!s->xb2)
-        goto malloc_error;
-
     s->hb = calloc(p->hidden_dim, sizeof(float));
-    if (!s->hb)
-        goto malloc_error;
-
     s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    if (!s->hb2)
-        goto malloc_error;
-
     s->q = calloc(p->dim, sizeof(float));
-    if (!s->q)
-        goto malloc_error;
-
     s->k = calloc(kv_dim, sizeof(float));
-    if (!s->k)
-        goto malloc_error;
-
     s->v = calloc(kv_dim, sizeof(float));
-    if (!s->v)
-        goto malloc_error;
-
     s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    if (!s->att)
-        goto malloc_error;
-
     s->logits = calloc(p->vocab_size, sizeof(float));
-    if (!s->logits)
-        goto malloc_error;
-
     s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    if (!s->key_cache)
-        goto malloc_error;
-
     s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    if (!s->value_cache)
+
+    // Validate allocations
+    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q ||
+        !s->k || !s->v || !s->att || !s->logits || !s->key_cache ||
+        !s->value_cache)
+    {
+        fprintf(stderr, "malloc failed! Attempted to allocate %.2f MB\n",
+                total_size / (1024.0 * 1024.0));
         goto malloc_error;
+    }
 
     fprintf(stderr, "Memory allocation successful!\n");
     return;
 
 malloc_error:
-    fprintf(stderr, "malloc failed! Attempted to allocate %.2f MB\n",
-            total_size / (1024.0 * 1024.0));
-    fprintf(stderr, "Try reducing model size or sequence length\n");
-
-    // Cleanup any successful allocations
-    if (s->x)
-        free(s->x);
-    if (s->xb)
-        free(s->xb);
-    if (s->xb2)
-        free(s->xb2);
-    if (s->hb)
-        free(s->hb);
-    if (s->hb2)
-        free(s->hb2);
-    if (s->q)
-        free(s->q);
-    if (s->k)
-        free(s->k);
-    if (s->v)
-        free(s->v);
-    if (s->att)
-        free(s->att);
-    if (s->logits)
-        free(s->logits);
-    if (s->key_cache)
-        free(s->key_cache);
-    if (s->value_cache)
-        free(s->value_cache);
-
+    free_run_state(s);
     exit(EXIT_FAILURE);
 }
 
@@ -260,67 +207,82 @@ void free_run_state(RunState *s)
 
 void memory_map_weights(TransformerWeights *w, Config *p, float *ptr)
 {
-    // First calculate all offsets correctly
+    // Calculate dimensions correctly
     int head_size = p->dim / p->n_heads;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    unsigned long long n_layers = p->n_layers;
+    size_t offset = 0;
 
-    // Debug print memory offsets
+    // Debug dimensions
     fprintf(stderr, "\nMemory mapping offsets:\n");
     fprintf(stderr, "head_size: %d\n", head_size);
     fprintf(stderr, "kv_dim: %d\n", kv_dim);
 
     // Token embeddings
     w->token_embedding_table = ptr;
-    ptr += p->vocab_size * p->dim;
-    fprintf(stderr, "token_embedding offset: %ld\n", (long)(ptr - w->token_embedding_table));
+    offset = p->vocab_size * p->dim;
+    ptr += offset;
+    fprintf(stderr, "token_embedding offset: %zu\n", offset);
 
-    // Attention weights
+    // Attention weights per layer
     w->rms_att_weight = ptr;
-    ptr += n_layers * p->dim;
-    fprintf(stderr, "rms_att offset: %ld\n", (long)(ptr - w->rms_att_weight));
+    ptr += p->n_layers * p->dim;
+    offset = p->n_layers * p->dim;
+    fprintf(stderr, "rms_att offset: %zu\n", offset);
 
-    // Carefully map Q,K,V weights with proper dimensions
+    // Q, K, V projections
     w->wq = ptr;
-    ptr += n_layers * p->dim * p->dim; // Changed from n_heads * head_size
-    fprintf(stderr, "wq offset: %ld\n", (long)(ptr - w->wq));
+    ptr += p->n_layers * p->dim * p->dim;
+    offset = p->n_layers * p->dim * p->dim;
+    fprintf(stderr, "wq offset: %zu\n", offset);
 
     w->wk = ptr;
-    ptr += n_layers * p->dim * kv_dim;
-    fprintf(stderr, "wk offset: %ld\n", (long)(ptr - w->wk));
+    ptr += p->n_layers * p->dim * kv_dim;
+    offset = p->n_layers * p->dim * kv_dim;
+    fprintf(stderr, "wk offset: %zu\n", offset);
 
     w->wv = ptr;
-    ptr += n_layers * p->dim * kv_dim;
-    fprintf(stderr, "wv offset: %ld\n", (long)(ptr - w->wv));
+    ptr += p->n_layers * p->dim * kv_dim;
+    offset = p->n_layers * p->dim * kv_dim;
+    fprintf(stderr, "wv offset: %zu\n", offset);
 
     w->wo = ptr;
-    ptr += n_layers * p->dim * p->dim; // Changed from n_heads * head_size
-    fprintf(stderr, "wo offset: %ld\n", (long)(ptr - w->wo));
+    ptr += p->n_layers * kv_dim * p->dim;
+    offset = p->n_layers * kv_dim * p->dim;
+    fprintf(stderr, "wo offset: %zu\n", offset);
 
     // FFN weights
     w->rms_ffn_weight = ptr;
-    ptr += n_layers * p->dim;
-    fprintf(stderr, "rms_ffn offset: %ld\n", (long)(ptr - w->rms_ffn_weight));
+    ptr += p->n_layers * p->dim;
+    offset = p->n_layers * p->dim;
+    fprintf(stderr, "rms_ffn offset: %zu\n", offset);
 
     w->w1 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    fprintf(stderr, "w1 offset: %ld\n", (long)(ptr - w->w1));
+    ptr += p->n_layers * p->dim * p->hidden_dim;
+    offset = p->n_layers * p->dim * p->hidden_dim;
+    fprintf(stderr, "w1 offset: %zu\n", offset);
 
     w->w2 = ptr;
-    ptr += n_layers * p->hidden_dim * p->dim;
-    fprintf(stderr, "w2 offset: %ld\n", (long)(ptr - w->w2));
+    ptr += p->n_layers * p->hidden_dim * p->dim;
+    offset = p->n_layers * p->hidden_dim * p->dim;
+    fprintf(stderr, "w2 offset: %zu\n", offset);
 
     w->w3 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    fprintf(stderr, "w3 offset: %ld\n", (long)(ptr - w->w3));
+    ptr += p->n_layers * p->dim * p->hidden_dim;
+    offset = p->n_layers * p->dim * p->hidden_dim;
+    fprintf(stderr, "w3 offset: %zu\n", offset);
 
     // Final normalization
     w->rms_final_weight = ptr;
     ptr += p->dim;
-    fprintf(stderr, "rms_final offset: %ld\n", (long)(ptr - w->rms_final_weight));
+    offset = p->dim;
+    fprintf(stderr, "rms_final offset: %zu\n", offset);
 
     // Classifier weights (shared with token embeddings)
     w->wcls = w->token_embedding_table;
+
+    // Print total offset for verification
+    fprintf(stderr, "Total weights size: %zu bytes\n",
+            offset * sizeof(float));
 }
 
 void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weights,
