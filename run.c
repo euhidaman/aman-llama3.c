@@ -129,6 +129,13 @@ void free_transformer(Transformer *t)
 
 void malloc_run_state(RunState *s, Config *p)
 {
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+
+    // Print debug info
+    fprintf(stderr, "\nRunState memory allocation:\n");
+    fprintf(stderr, "kv_dim: %d\n", kv_dim);
+    fprintf(stderr, "hidden_dim: %d\n", p->hidden_dim);
+
     // Print memory requirements
     size_t total_size = 0;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -252,43 +259,66 @@ void free_run_state(RunState *s)
 
 void memory_map_weights(TransformerWeights *w, Config *p, float *ptr)
 {
+    // First calculate all offsets correctly
     int head_size = p->dim / p->n_heads;
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     unsigned long long n_layers = p->n_layers;
 
+    // Debug print memory offsets
+    fprintf(stderr, "\nMemory mapping offsets:\n");
+    fprintf(stderr, "head_size: %d\n", head_size);
+    fprintf(stderr, "kv_dim: %d\n", kv_dim);
+
+    // Token embeddings
     w->token_embedding_table = ptr;
     ptr += p->vocab_size * p->dim;
+    fprintf(stderr, "token_embedding offset: %ld\n", (long)(ptr - w->token_embedding_table));
 
+    // Attention weights
     w->rms_att_weight = ptr;
     ptr += n_layers * p->dim;
+    fprintf(stderr, "rms_att offset: %ld\n", (long)(ptr - w->rms_att_weight));
 
+    // Carefully map Q,K,V weights with proper dimensions
     w->wq = ptr;
-    ptr += n_layers * p->dim * (p->n_heads * head_size);
+    ptr += n_layers * p->dim * p->dim; // Changed from n_heads * head_size
+    fprintf(stderr, "wq offset: %ld\n", (long)(ptr - w->wq));
 
     w->wk = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
+    ptr += n_layers * p->dim * kv_dim;
+    fprintf(stderr, "wk offset: %ld\n", (long)(ptr - w->wk));
 
     w->wv = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
+    ptr += n_layers * p->dim * kv_dim;
+    fprintf(stderr, "wv offset: %ld\n", (long)(ptr - w->wv));
 
     w->wo = ptr;
-    ptr += n_layers * (p->n_heads * head_size) * p->dim;
+    ptr += n_layers * p->dim * p->dim; // Changed from n_heads * head_size
+    fprintf(stderr, "wo offset: %ld\n", (long)(ptr - w->wo));
 
+    // FFN weights
     w->rms_ffn_weight = ptr;
     ptr += n_layers * p->dim;
+    fprintf(stderr, "rms_ffn offset: %ld\n", (long)(ptr - w->rms_ffn_weight));
 
     w->w1 = ptr;
     ptr += n_layers * p->dim * p->hidden_dim;
+    fprintf(stderr, "w1 offset: %ld\n", (long)(ptr - w->w1));
 
     w->w2 = ptr;
     ptr += n_layers * p->hidden_dim * p->dim;
+    fprintf(stderr, "w2 offset: %ld\n", (long)(ptr - w->w2));
 
     w->w3 = ptr;
     ptr += n_layers * p->dim * p->hidden_dim;
+    fprintf(stderr, "w3 offset: %ld\n", (long)(ptr - w->w3));
 
+    // Final normalization
     w->rms_final_weight = ptr;
     ptr += p->dim;
+    fprintf(stderr, "rms_final offset: %ld\n", (long)(ptr - w->rms_final_weight));
 
-    // Classifier uses same weights as token_embedding
+    // Classifier weights (shared with token embeddings)
     w->wcls = w->token_embedding_table;
 }
 
@@ -362,28 +392,27 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     fprintf(stderr, "- Vocab Size: %d\n", config->vocab_size);
     fprintf(stderr, "- Sequence Length: %d\n", config->seq_len);
 
-    // Calculate expected file size with correct dimensions
-    size_t expected_size = 40; // Config struct size (10 integers/floats * 4 bytes)
+    // Calculate expected size more accurately
+    size_t expected_size = 40; // Config header
+    int kv_dim = (config->dim * config->n_kv_heads) / config->n_heads;
 
     // Token embeddings
     expected_size += config->vocab_size * config->dim * sizeof(float);
 
-    // Per layer weights
+    // Per layer weights with correct dimensions
     size_t layer_weights = 0;
     layer_weights += config->dim * sizeof(float);                      // rms_att_weight
     layer_weights += config->dim * config->dim * sizeof(float);        // wq
-    layer_weights += config->dim * config->dim * sizeof(float);        // wk
-    layer_weights += config->dim * config->dim * sizeof(float);        // wv
+    layer_weights += config->dim * kv_dim * sizeof(float);             // wk
+    layer_weights += config->dim * kv_dim * sizeof(float);             // wv
     layer_weights += config->dim * config->dim * sizeof(float);        // wo
     layer_weights += config->dim * sizeof(float);                      // rms_ffn_weight
     layer_weights += config->dim * config->hidden_dim * sizeof(float); // w1
-    layer_weights += config->dim * config->hidden_dim * sizeof(float); // w2
+    layer_weights += config->hidden_dim * config->dim * sizeof(float); // w2
     layer_weights += config->dim * config->hidden_dim * sizeof(float); // w3
 
     expected_size += layer_weights * config->n_layers;
-
-    // Final RMSNorm
-    expected_size += config->dim * sizeof(float);
+    expected_size += config->dim * sizeof(float); // final rms norm
 
     // Get actual file size
     fseek(file, 0, SEEK_END);
