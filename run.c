@@ -251,88 +251,124 @@ void memory_map_weights(TransformerWeights *w, Config *p, float *ptr)
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     size_t running_offset = 0;
 
-    fprintf(stderr, "\nMemory mapping details:\n");
+    fprintf(stderr, "\nDebug: Memory mapping weights\n");
     fprintf(stderr, "head_size: %d\n", head_size);
     fprintf(stderr, "kv_dim: %d\n", kv_dim);
 
-    // Map weights in the exact order they were written
+    // Map token embeddings
     w->token_embedding_table = ptr;
     running_offset = p->vocab_size * p->dim;
     ptr += running_offset;
+    fprintf(stderr, "token_embedding offset: %zu bytes\n", running_offset * sizeof(float));
 
-    // Layer weights
+    // Map attention weights for each layer
+    size_t layer_offset = 0;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->rms_att_weight = ptr;
+        // RMSNorm weights
+        if (l == 0)
+            w->rms_att_weight = ptr;
         ptr += p->dim;
-        running_offset += p->dim;
+        layer_offset = p->dim;
+        running_offset += layer_offset;
+
+        fprintf(stderr, "Layer %d rms_att offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // Query weights
+    layer_offset = p->dim * p->dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->wq = ptr;
-        ptr += p->dim * p->dim;
-        running_offset += p->dim * p->dim;
+        if (l == 0)
+            w->wq = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d wq offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // Key weights
+    layer_offset = p->dim * kv_dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->wk = ptr;
-        ptr += p->dim * kv_dim;
-        running_offset += p->dim * kv_dim;
+        if (l == 0)
+            w->wk = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d wk offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // Value weights
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->wv = ptr;
-        ptr += p->dim * kv_dim;
-        running_offset += p->dim * kv_dim;
+        if (l == 0)
+            w->wv = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d wv offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // Output projection
+    layer_offset = p->dim * p->dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->wo = ptr;
-        ptr += p->dim * p->dim;
-        running_offset += p->dim * p->dim;
+        if (l == 0)
+            w->wo = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d wo offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // FFN weights
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->rms_ffn_weight = ptr;
+        if (l == 0)
+            w->rms_ffn_weight = ptr;
         ptr += p->dim;
-        running_offset += p->dim;
+        layer_offset = p->dim;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d rms_ffn offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    // FFN projections
+    layer_offset = p->dim * p->hidden_dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->w1 = ptr;
-        ptr += p->dim * p->hidden_dim;
-        running_offset += p->dim * p->hidden_dim;
+        if (l == 0)
+            w->w1 = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d w1 offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    layer_offset = p->hidden_dim * p->dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->w2 = ptr;
-        ptr += p->hidden_dim * p->dim;
-        running_offset += p->hidden_dim * p->dim;
+        if (l == 0)
+            w->w2 = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d w2 offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
+    layer_offset = p->dim * p->hidden_dim;
     for (int l = 0; l < p->n_layers; l++)
     {
-        w->w3 = ptr;
-        ptr += p->dim * p->hidden_dim;
-        running_offset += p->dim * p->hidden_dim;
+        if (l == 0)
+            w->w3 = ptr;
+        ptr += layer_offset;
+        running_offset += layer_offset;
+        fprintf(stderr, "Layer %d w3 offset: %zu bytes\n", l, layer_offset * sizeof(float));
     }
 
     // Final norm
     w->rms_final_weight = ptr;
+    ptr += p->dim;
     running_offset += p->dim;
 
-    // Share classifier weights with token embeddings
+    // Share classifier weights
     w->wcls = w->token_embedding_table;
 
-    fprintf(stderr, "Total weights mapped: %zu bytes\n",
-            running_offset * sizeof(float));
+    fprintf(stderr, "Total weights mapped: %zu bytes\n", running_offset * sizeof(float));
 }
 
 void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weights,
@@ -483,6 +519,21 @@ float *forward(Transformer *transformer, int token, int pos)
     Config *p = &transformer->config;
     TransformerWeights *w = &transformer->weights;
     RunState *s = &transformer->state;
+
+    fprintf(stderr, "\nDebug: Forward pass for token %d at pos %d\n", token, pos);
+
+    // Validate parameters
+    if (token >= p->vocab_size)
+    {
+        fprintf(stderr, "Error: token %d exceeds vocab_size %d\n", token, p->vocab_size);
+        exit(1);
+    }
+    if (pos >= p->seq_len)
+    {
+        fprintf(stderr, "Error: position %d exceeds seq_len %d\n", pos, p->seq_len);
+        exit(1);
+    }
+
     float *x = s->x;
     int dim = p->dim;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -590,6 +641,17 @@ float *forward(Transformer *transformer, int token, int pos)
 
     // Classifier into logits
     matmul(s->logits, x, w->wcls, dim, p->vocab_size);
+
+    // Add validation before returning
+    for (int i = 0; i < p->vocab_size; i++)
+    {
+        if (!isfinite(s->logits[i]))
+        {
+            fprintf(stderr, "Warning: Invalid logit value at index %d\n", i);
+            s->logits[i] = 0.0f;
+        }
+    }
+
     return s->logits;
 }
 
