@@ -382,6 +382,20 @@ def save_config(save_dir, params, args):
     print(f"Configuration saved to {config_path}")
 
 
+def count_parameters(model):
+    """Count and print the number of parameters in the model"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel()
+                           for p in model.parameters() if p.requires_grad)
+
+    print(f"\nModel Parameters:")
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Size: {total_params * 4 / 1024 / 1024:.2f} MB (fp32 equivalent)")
+
+    return total_params
+
+
 def main():
     # Parse arguments
     args = setup_args()
@@ -426,6 +440,10 @@ def main():
 
         print(
             f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+
+        # CCount total model parameters:
+        model = Llama3(args)
+        count_parameters(model)
 
         # Initialize optimizer and scheduler
         optimizer = torch.optim.AdamW(
