@@ -438,11 +438,7 @@ def main():
         model = Llama3(params, tokenizer).to(params.device)
         model = model.float()  # Convert to float32 for stability
 
-        print(
-            f"\nModel has {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
-
-        # CCount total model parameters:
-        model = Llama3(args)
+        # Print total number of parameters
         count_parameters(model)
 
         # Initialize optimizer and scheduler
